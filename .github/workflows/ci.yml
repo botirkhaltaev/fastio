@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.rust }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        rust: [stable, "1.92"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check default features
+        run: cargo check --all-targets
+
+      - name: Check no default features
+        run: cargo check --no-default-features --all-targets
+
+      - name: Check Tokio without Rayon
+        run: cargo check --no-default-features --features tokio --all-targets
+
+      - name: Test all features
+        run: cargo test --all-features
+
+      - name: Clippy all features
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  linux-feature-matrix:
+    name: Linux feature matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check sync only
+        run: cargo check --no-default-features --features sync --all-targets
+
+      - name: Check mmap only
+        run: cargo check --no-default-features --features mmap --all-targets
+
+      - name: Check pool only
+        run: cargo check --no-default-features --features pool --all-targets
+
+      - name: Check io-uring only
+        run: cargo check --no-default-features --features io-uring --all-targets
