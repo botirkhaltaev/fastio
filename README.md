@@ -19,7 +19,7 @@ Default features enable all supported backends for the current platform.
 ```rust
 use fastio::{BlockingIo, SyncIo};
 
-let bytes = SyncIo::new().read_file("model.bin".as_ref())?;
+let bytes = SyncIo::new().read_file("model.bin")?;
 # Ok::<(), std::io::Error>(())
 ```
 
