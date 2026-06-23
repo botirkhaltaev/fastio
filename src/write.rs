@@ -30,15 +30,16 @@ impl<'a> WriteSlice<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct WriteSlices<'a>(&'a [WriteSlice<'a>]);
+pub struct WriteSlices<'s, 'd>(&'s [WriteSlice<'d>]);
 
-impl<'a> WriteSlices<'a> {
-    pub fn new(slices: &'a [WriteSlice<'a>]) -> IoResult<Self> {
+impl<'s, 'd> WriteSlices<'s, 'd> {
+    pub fn new(slices: &'s [WriteSlice<'d>]) -> IoResult<Self> {
         let mut sorted: Vec<(u64, u64)> = slices
             .iter()
+            .filter(|w| !w.data.is_empty())
             .map(|w| w.end_offset().map(|end| (w.offset, end)))
             .collect::<IoResult<_>>()?;
-        sorted.sort_unstable_by_key(|&(s, _)| s);
+        sorted.sort_unstable_by_key(|&(start, _)| start);
         for pair in sorted.windows(2) {
             if pair[0].1 > pair[1].0 {
                 return Err(Error::new(ErrorKind::InvalidInput, "write slices overlap"));
@@ -49,13 +50,7 @@ impl<'a> WriteSlices<'a> {
 
     #[inline]
     #[must_use]
-    pub const fn new_unchecked(slices: &'a [WriteSlice<'a>]) -> Self {
-        Self(slices)
-    }
-
-    #[inline]
-    #[must_use]
-    pub const fn as_slice(self) -> &'a [WriteSlice<'a>] {
+    pub const fn as_slice(self) -> &'s [WriteSlice<'d>] {
         self.0
     }
 
@@ -88,5 +83,35 @@ mod tests {
         let b = WriteSlice::new(3, b"BBBBB");
         let err = WriteSlices::new(&[a, b]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn write_slices_allows_empty_slice_inside_non_empty_range() {
+        let a = WriteSlice::new(0, b"AAAAA");
+        let b = WriteSlice::new(3, b"");
+        assert!(WriteSlices::new(&[a, b]).is_ok());
+    }
+
+    #[test]
+    fn write_slices_allows_adjacent_ranges() {
+        let a = WriteSlice::new(0, b"abc");
+        let b = WriteSlice::new(3, b"def");
+        let slices = [a, b];
+
+        let writes = WriteSlices::new(&slices).unwrap();
+
+        assert_eq!(writes.len(), 2);
+    }
+
+    #[test]
+    fn write_slices_allows_unsorted_non_overlapping_ranges() {
+        let first = WriteSlice::new(10, b"tail");
+        let second = WriteSlice::new(0, b"head");
+        let slices = [first, second];
+
+        let writes = WriteSlices::new(&slices).unwrap();
+
+        assert_eq!(writes.as_slice()[0].offset, 10);
+        assert_eq!(writes.as_slice()[1].offset, 0);
     }
 }

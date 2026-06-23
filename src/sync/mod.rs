@@ -1,56 +1,157 @@
-//! Synchronous blocking I/O backend.
+//! Synchronous blocking file I/O.
 //!
-//! [`Sync`] implements [`BlockingIo`](crate::BlockingIo).
-//! Each OS has an explicit implementation:
-//! - Linux: O_DIRECT-aware chunked reads with `write_at` positioned writes.
-//! - macOS: `std::os::unix::fs::FileExt` positioned I/O.
-//! - Windows: `std::os::windows::fs::FileExt` positioned I/O.
-
-/// Controls O_DIRECT usage for bypassing the kernel page cache.
-///
-/// Only takes effect on Linux. On other platforms this option is accepted
-/// but silently ignored (all I/O goes through the page cache).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DirectIo {
-    /// Never use O_DIRECT. All reads go through the kernel page cache.
-    Disabled,
-    /// Require O_DIRECT. Returns an error if the filesystem doesn't support it.
-    Enabled,
-    /// Try O_DIRECT, fall back to buffered I/O if the filesystem doesn't support it.
-    #[default]
-    Auto,
-}
-
-/// Options for the synchronous I/O backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct SyncOptions {
-    /// Number of Rayon worker threads for batch reads/writes.
-    ///
-    /// `None` uses the global Rayon thread pool. `Some(n)` creates a backend-local
-    /// pool with exactly `n` threads; `n == 0` is rejected by [`SyncIo::with_options`].
-    pub batch_threads: Option<usize>,
-
-    /// Controls whether to use O_DIRECT for reads (Linux only, ignored elsewhere).
-    pub direct_io: DirectIo,
-
-    /// Controls how read buffers are allocated.
-    pub allocator: crate::buffer::BufferAllocator,
-}
+//! Each supported platform owns its `File` and `OpenOptions` implementation.
 
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "linux")]
-pub use linux::SyncIo;
-
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "macos")]
-pub use macos::SyncIo;
-
 #[cfg(target_os = "windows")]
 mod windows;
+
+#[cfg(target_os = "linux")]
+pub use linux::{File, OpenOptions};
+#[cfg(target_os = "macos")]
+pub use macos::{File, OpenOptions};
 #[cfg(target_os = "windows")]
-pub use windows::SyncIo;
+pub use windows::{File, OpenOptions};
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 compile_error!("fastio sync supports Linux, macOS, and Windows only");
+
+#[cfg(test)]
+mod file_api_tests {
+    use super::*;
+    use crate::{Allocator, OwnedBytes, System, WriteSlice, WriteSlices};
+    use std::io::{Read, Seek, SeekFrom};
+    use tempfile::TempDir;
+
+    #[derive(Debug, Clone)]
+    struct ShortAllocator;
+
+    impl Allocator for ShortAllocator {
+        fn allocate(&self, len: usize) -> OwnedBytes {
+            OwnedBytes::Vec(vec![0; len.saturating_sub(1)])
+        }
+    }
+
+    #[test]
+    fn file_read_all_reads_entire_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+
+        let bytes = File::open(&path).unwrap().read_all().unwrap();
+
+        assert_eq!(bytes.as_ref(), b"abcdef");
+    }
+
+    #[test]
+    fn file_read_at_reads_positioned_bytes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+
+        let file = File::open(&path).unwrap();
+        let bytes = file.read_at(2, 3).unwrap();
+
+        assert_eq!(bytes.as_ref(), b"cde");
+    }
+
+    #[cfg(feature = "pool")]
+    #[test]
+    fn default_allocator_returns_pooled_read_buffer() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+
+        let bytes = File::open(&path).unwrap().read_all().unwrap();
+
+        assert!(matches!(&bytes, OwnedBytes::Pooled(_)));
+        assert_eq!(bytes.as_ref(), b"abcdef");
+    }
+
+    #[test]
+    fn system_allocator_returns_vec_read_buffer() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+
+        let file = OpenOptions::new()
+            .read(true)
+            .allocator(System)
+            .open(&path)
+            .unwrap();
+        let bytes = file.read_at(1, 3).unwrap();
+
+        assert!(matches!(&bytes, OwnedBytes::Vec(_)));
+        assert_eq!(bytes.as_ref(), b"bcd");
+    }
+
+    #[test]
+    fn file_write_all_at_writes_positioned_bytes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all_at(2, b"XX").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"abXXef");
+    }
+
+    #[test]
+    fn read_all_does_not_move_cursor() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+
+        let mut file = OpenOptions::new().read(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(2)).unwrap();
+        let bytes = file.read_all().unwrap();
+        let mut next = [0u8; 1];
+        file.read_exact(&mut next).unwrap();
+
+        assert_eq!(bytes.as_ref(), b"abcdef");
+        assert_eq!(next, [b'c']);
+    }
+
+    #[test]
+    fn create_new_fails_when_file_exists() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("existing.bin");
+        std::fs::write(&path, b"already here").unwrap();
+
+        let err = File::create_new(&path).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn write_slices_at_rejects_overlapping_slices() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"----------").unwrap();
+        let slices = [WriteSlice::new(0, b"abcdef"), WriteSlice::new(3, b"XYZ")];
+
+        let err = WriteSlices::new(&slices).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn read_reports_allocator_contract_violation() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .allocator(ShortAllocator)
+            .open(&path)
+            .unwrap();
+
+        let err = file.read_at(0, 3).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+    }
+}

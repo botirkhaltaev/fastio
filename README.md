@@ -2,30 +2,50 @@
 
 Fast file I/O backends for Rust libraries and applications.
 
-`fastio` provides a small set of traits and backend implementations for blocking I/O, Tokio I/O, memory maps, and Linux `io_uring`. Backends are cheap configuration values. Constructors validate local options; platform, kernel, filesystem, and permission failures are returned by the operation that encounters them.
+`fastio` exposes explicit backend-owned file handles. There is no default backend and no module-level convenience API: choose `sync::File`, `tokio::File`, `mmap::File`, or Linux `uring::File` directly.
 
 ## Features
 
-- `sync`: synchronous positioned I/O with Rayon-backed batch operations.
+- `sync`: synchronous file I/O with positioned read/write methods.
 - `tokio`: async I/O using Tokio, without a Rayon dependency.
 - `mmap`: read-only memory maps using `memmap2`.
-- `io-uring`: Linux-only `io_uring` backend.
+- `io-uring`: Linux-only `io_uring` backend. Cursor traits and positioned methods are ring-backed; append mode is intentionally unsupported.
 - `pool`: pooled read buffers using `zeropool`.
 
 Default features enable all supported backends for the current platform.
+With `pool` enabled, read methods allocate from the process-wide pool by
+default and return `OwnedBytes::Pooled`. Use `System` on an `OpenOptions` value
+to force normal heap-backed `OwnedBytes::Vec` reads. Zero-length reads return
+an empty `OwnedBytes::Vec` without touching the allocator.
 
 ## Example
 
 ```rust
-use fastio::{BlockingIo, SyncIo};
+use fastio::sync::File;
 
-let bytes = SyncIo::new().read_file("model.bin")?;
+let file = File::open("model.bin")?;
+let bytes = file.read_at(0, 4096)?;
+# Ok::<(), std::io::Error>(())
+```
+
+```rust
+use fastio::{System, sync::File};
+
+let file = File::options()
+    .read(true)
+    .allocator(System)
+    .open("model.bin")?;
+let bytes = file.read_at(0, 4096)?;
 # Ok::<(), std::io::Error>(())
 ```
 
 ## Development
 
 ```bash
+cargo fmt --all -- --check
+cargo check --all-targets
+cargo check --no-default-features --all-targets
+cargo check --no-default-features --features tokio --all-targets
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 ```

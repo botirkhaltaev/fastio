@@ -1,7 +1,9 @@
 # tokio Backend
 
-The `tokio` module provides `Tokio`, an async backend implementing `AsyncIo`.
+The `tokio` module provides a `tokio::fs`-like `File` and `OpenOptions` with positioned I/O methods.
 
-Reads use Tokio filesystem APIs and bounded task concurrency. Positioned writes use blocking positioned I/O inside Tokio blocking sections so callers can write independent file ranges in parallel.
+Regular filesystem operations use `tokio::fs` directly. Positioned reads and writes move owned buffers into blocking tasks because Tokio does not expose positioned file I/O; batch writes use bounded worker waves inside one blocking task.
+
+`File` and `OpenOptions` are allocator-generic. Default reads use pooled buffers when `pool` is enabled; call `OpenOptions::allocator(System)` to force heap-backed reads.
 
 This feature intentionally does not depend on Rayon.
