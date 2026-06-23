@@ -1,25 +1,20 @@
-//! Synchronous blocking file I/O.
+//! Linux `io_uring` file I/O.
 //!
-//! This module intentionally mirrors [`std::fs`] where behavior matches, while
-//! adding positioned I/O methods for large-file workloads.
+//! This module mirrors `std::fs` where possible and adds positioned I/O backed
+//! by a thread-local `io_uring` instance.
 
 use std::fs::{Metadata, Permissions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use crate::io_uring::{IoUring, IoUringOptions};
 use crate::{OwnedBytes, WriteSlice, WriteSlices};
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-compile_error!("fastio sync supports Linux, macOS, and Windows only");
-
-/// A synchronous file handle.
-///
-/// `File` follows [`std::fs::File`] for familiar operations and adds explicit
-/// positioned read/write methods where the standard library has no portable
-/// inherent API.
+/// A Linux `io_uring` file handle.
 #[derive(Debug)]
 pub struct File {
     inner: std::fs::File,
+    backend: IoUring,
 }
 
 impl File {
@@ -48,10 +43,11 @@ impl File {
         OpenOptions::new()
     }
 
-    /// Creates a new `File` instance that shares the same underlying file handle.
+    /// Creates a new `File` instance sharing the same underlying handle.
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             inner: self.inner.try_clone()?,
+            backend: self.backend,
         })
     }
 
@@ -82,15 +78,14 @@ impl File {
 
     /// Reads the whole file into memory from offset 0.
     pub fn read_all(&self) -> io::Result<OwnedBytes> {
-        let mut file = self.inner.try_clone()?;
-        file.seek(SeekFrom::Start(0))?;
-        let len = usize::try_from(file.metadata()?.len())
+        let len = usize::try_from(self.inner.metadata()?.len())
             .map_err(|_| io::Error::other("file too large"))?;
         if len == 0 {
             return Ok(OwnedBytes::Vec(Vec::new()));
         }
         let mut bytes = Vec::with_capacity(len);
-        file.read_to_end(&mut bytes)?;
+        bytes.resize(len, 0);
+        self.backend.read_exact_at(&self.inner, 0, &mut bytes)?;
         Ok(OwnedBytes::Vec(bytes))
     }
 
@@ -106,67 +101,19 @@ impl File {
 
     /// Reads exactly enough bytes to fill `buf` at `offset`.
     pub fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            self.inner.read_exact_at(buf, offset)
-        }
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::FileExt;
-            let mut read = 0usize;
-            while read < buf.len() {
-                let n = self
-                    .inner
-                    .seek_read(&mut buf[read..], offset + read as u64)?;
-                if n == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "seek_read returned zero bytes before buffer was filled",
-                    ));
-                }
-                read += n;
-            }
-            Ok(())
-        }
+        self.backend.read_exact_at(&self.inner, offset, buf)
     }
 
     /// Writes all bytes from `buf` at `offset`.
     pub fn write_all_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            self.inner.write_all_at(buf, offset)
-        }
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::FileExt;
-            let mut written = 0usize;
-            while written < buf.len() {
-                let n = self
-                    .inner
-                    .seek_write(&buf[written..], offset + written as u64)?;
-                if n == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "seek_write returned zero bytes",
-                    ));
-                }
-                written += n;
-            }
-            Ok(())
-        }
+        self.backend.write_exact_at(&self.inner, offset, buf)
     }
 
     /// Writes non-overlapping slices at their offsets.
     pub fn write_slices_at(&self, slices: &[WriteSlice<'_>]) -> io::Result<()> {
         let writes = WriteSlices::new(slices)?;
-        for write in writes.as_slice() {
-            self.write_all_at(write.offset, write.data)?;
-        }
-        Ok(())
+        self.backend
+            .ring_batch_writes(&self.inner, writes.as_slice())
     }
 }
 
@@ -198,20 +145,23 @@ impl AsRef<std::fs::File> for File {
     }
 }
 
-/// Options and flags for opening a synchronous file.
+/// Options and flags for opening an `io_uring` file.
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
     inner: std::fs::OpenOptions,
-    direct_io: bool,
+    ring_depth: u32,
+    chunk_size: usize,
 }
 
 impl OpenOptions {
     /// Creates a blank set of options.
     #[must_use]
     pub fn new() -> Self {
+        let defaults = IoUringOptions::default();
         Self {
             inner: std::fs::OpenOptions::new(),
-            direct_io: false,
+            ring_depth: defaults.ring_depth,
+            chunk_size: defaults.chunk_size,
         }
     }
 
@@ -251,39 +201,28 @@ impl OpenOptions {
         self
     }
 
-    /// Requests platform direct I/O.
-    ///
-    /// Direct I/O is currently supported only on Linux. Other platforms return
-    /// [`io::ErrorKind::Unsupported`] when this is enabled.
-    pub fn direct_io(&mut self, enabled: bool) -> &mut Self {
-        self.direct_io = enabled;
+    /// Sets the ring depth used by this file.
+    pub fn ring_depth(&mut self, ring_depth: u32) -> &mut Self {
+        self.ring_depth = ring_depth;
+        self
+    }
+
+    /// Sets the maximum chunk size submitted to the ring.
+    pub fn chunk_size(&mut self, chunk_size: usize) -> &mut Self {
+        self.chunk_size = chunk_size;
         self
     }
 
     /// Opens a file with the configured options.
     pub fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
-        #[cfg(target_os = "linux")]
-        let inner = {
-            let mut options = self.inner.clone();
-            if self.direct_io {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.custom_flags(libc::O_DIRECT);
-            }
-            options.open(path)?
-        };
-
-        #[cfg(not(target_os = "linux"))]
-        let inner = {
-            if self.direct_io {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "direct I/O is only supported on Linux",
-                ));
-            }
-            self.inner.open(path)?
-        };
-
-        Ok(File { inner })
+        let backend = IoUring::with_options(IoUringOptions {
+            ring_depth: self.ring_depth,
+            chunk_size: self.chunk_size,
+        })?;
+        Ok(File {
+            inner: self.inner.open(path)?,
+            backend,
+        })
     }
 }
 
@@ -298,15 +237,16 @@ pub fn read<P: AsRef<Path>>(path: P) -> io::Result<OwnedBytes> {
     File::open(path)?.read_all()
 }
 
-/// Reads the entire contents of a file into a string.
-pub fn read_to_string<P: AsRef<Path>>(path: P) -> io::Result<String> {
-    std::fs::read_to_string(path)
-}
-
 /// Writes a slice as the entire contents of a file.
 pub fn write<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> io::Result<()> {
     let mut file = File::create(path)?;
     file.write_all(contents.as_ref())
+}
+
+/// Reads the entire contents of a file into a string.
+pub fn read_to_string<P: AsRef<Path>>(path: P) -> io::Result<String> {
+    String::from_utf8(read(path)?.into_vec())
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
 /// Copies one file to another.
@@ -342,63 +282,4 @@ pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> 
 /// Returns whether the path points at an existing entity.
 pub fn exists<P: AsRef<Path>>(path: P) -> io::Result<bool> {
     std::fs::exists(path)
-}
-
-#[cfg(test)]
-mod file_api_tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn read_reads_entire_file() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("model.bin");
-        std::fs::write(&path, b"abcdef").unwrap();
-
-        let bytes = read(&path).unwrap();
-
-        assert_eq!(bytes.as_ref(), b"abcdef");
-    }
-
-    #[test]
-    fn file_read_at_reads_positioned_bytes() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("model.bin");
-        std::fs::write(&path, b"abcdef").unwrap();
-
-        let file = File::open(&path).unwrap();
-        let bytes = file.read_at(2, 3).unwrap();
-
-        assert_eq!(bytes.as_ref(), b"cde");
-    }
-
-    #[test]
-    fn file_write_all_at_writes_positioned_bytes() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("model.bin");
-        std::fs::write(&path, b"abcdef").unwrap();
-
-        let file = OpenOptions::new().write(true).open(&path).unwrap();
-        file.write_all_at(2, b"XX").unwrap();
-
-        assert_eq!(std::fs::read(&path).unwrap(), b"abXXef");
-    }
-
-    #[test]
-    fn open_options_direct_io_errors_on_non_linux() {
-        #[cfg(not(target_os = "linux"))]
-        {
-            let dir = TempDir::new().unwrap();
-            let path = dir.path().join("model.bin");
-            std::fs::write(&path, b"abcdef").unwrap();
-
-            let err = OpenOptions::new()
-                .read(true)
-                .direct_io(true)
-                .open(&path)
-                .unwrap_err();
-
-            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
-        }
-    }
 }

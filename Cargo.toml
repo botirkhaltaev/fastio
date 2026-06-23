@@ -1,6 +1,6 @@
 [package]
 name = "fastio"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Fast cross-platform file I/O backends for Rust"
@@ -11,16 +11,14 @@ categories = ["filesystem", "asynchronous", "concurrency"]
 
 [features]
 default = ["sync", "mmap", "pool", "tokio", "io-uring"]
-sync = ["dep:rayon", "dep:libc"]
+sync = ["dep:libc"]
 mmap = ["dep:memmap2", "dep:region"]
 pool = ["dep:zeropool"]
-tokio = ["dep:tokio", "dep:futures"]
+tokio = ["dep:tokio"]
 io-uring = ["dep:io-uring", "dep:libc"]
 
 [dependencies]
-futures = { version = "0.3", optional = true }
 memmap2 = { version = "0.9", optional = true }
-rayon = { version = "1.10", optional = true }
 region = { version = "3.0.2", optional = true }
 tokio = { version = "1", optional = true, features = ["rt", "rt-multi-thread", "fs", "macros", "io-util"] }
 zeropool = { version = "0.3.1", default-features = false, optional = true }

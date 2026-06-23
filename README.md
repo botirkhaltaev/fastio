@@ -2,11 +2,11 @@
 
 Fast file I/O backends for Rust libraries and applications.
 
-`fastio` provides a small set of traits and backend implementations for blocking I/O, Tokio I/O, memory maps, and Linux `io_uring`. Backends are cheap configuration values. Constructors validate local options; platform, kernel, filesystem, and permission failures are returned by the operation that encounters them.
+`fastio` exposes explicit backend modules with APIs shaped after `std::fs` and `tokio::fs`. There is no default backend: choose `sync`, `tokio`, `mmap`, or Linux `uring` directly.
 
 ## Features
 
-- `sync`: synchronous positioned I/O with Rayon-backed batch operations.
+- `sync`: synchronous file I/O with positioned read/write methods.
 - `tokio`: async I/O using Tokio, without a Rayon dependency.
 - `mmap`: read-only memory maps using `memmap2`.
 - `io-uring`: Linux-only `io_uring` backend.
@@ -17,9 +17,10 @@ Default features enable all supported backends for the current platform.
 ## Example
 
 ```rust
-use fastio::{BlockingIo, SyncIo};
+use fastio::sync::File;
 
-let bytes = SyncIo::new().read_file("model.bin")?;
+let file = File::open("model.bin")?;
+let bytes = file.read_at(0, 4096)?;
 # Ok::<(), std::io::Error>(())
 ```
 

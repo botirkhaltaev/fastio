@@ -4,14 +4,15 @@ Guidelines for agents editing `src`.
 
 ## Boundaries
 
-- Keep domain vocabulary in `range.rs`, `write.rs`, and `traits.rs`; avoid growing `lib.rs` with implementation details.
+- Keep domain vocabulary in `range.rs` and `write.rs`; avoid growing `lib.rs` with implementation details.
 - Keep backend modules focused on file I/O only.
+- Preserve explicit backend choice; do not add a root default file API.
 - Do not add format-specific behavior or policy decisions here.
 
 ## Feature Gates
 
-- `AsyncIo` and `tokio` code require `feature = "tokio"`.
-- `MmapIo`, `Mmap`, `MmapRegion`, and `OwnedBytes::Mmap` require `feature = "mmap"`.
+- `tokio` code requires `feature = "tokio"`.
+- `mmap::File`, `MmapRegion`, and `OwnedBytes::Mmap` require `feature = "mmap"`.
 - Pool-backed buffers require `feature = "pool"`.
 - `io_uring` is Linux-only and requires `feature = "io-uring"`.
 

@@ -1,9 +1,9 @@
 # sync Backend
 
-The `sync` module provides `SyncIo`, a blocking positioned I/O backend for Linux, macOS, and Windows.
+The `sync` module provides a `std::fs`-like `File`, `OpenOptions`, and module functions for Linux, macOS, and Windows.
 
-- Linux supports buffered reads and optional O_DIRECT reads.
+- Linux supports optional O_DIRECT with `OpenOptions::direct_io(true)`.
 - macOS and Windows use platform positioned-I/O APIs.
-- Batch operations use Rayon and are only available when the `sync` feature is enabled.
+- `File` implements `std::io::Read`, `Write`, and `Seek`.
 
-Use `SyncOptions` to configure batch thread count, direct I/O behavior, and read-buffer allocation.
+Use `File::read_at`, `File::read_exact_at`, `File::write_all_at`, and `File::write_slices_at` for positioned I/O.

@@ -1,15 +1,14 @@
 //! # fastio
 //!
-//! Fast file I/O backends with a small trait vocabulary for blocking, async,
-//! memory-mapped, and Linux `io_uring` access.
+//! Explicit file I/O backends with APIs shaped after `std::fs` and `tokio::fs`.
 //!
-//! Backends are cheap configuration values. Constructors validate only local
-//! options; platform, kernel, filesystem, and permission failures are returned
-//! by the I/O operation that encounters them.
+//! `fastio` intentionally has no default backend. Choose a backend module such
+//! as [`sync`], `tokio`, `mmap`, or Linux `uring`, then use that module's file
+//! API.
 //!
 //! # Features
 //!
-//! - `sync`: synchronous positioned I/O with Rayon-backed batch operations.
+//! - `sync`: synchronous `std::fs`-like file I/O.
 //! - `mmap`: read-only memory maps using `memmap2`.
 //! - `pool`: pooled read buffers using `zeropool`.
 //! - `tokio`: async I/O using Tokio, without a Rayon dependency.
@@ -18,25 +17,27 @@
 //! # Example
 //!
 //! ```no_run
-//! use fastio::{BlockingIo, SyncIo};
+//! use fastio::sync::File;
 //!
-//! let bytes = SyncIo::new().read_file("model.bin".as_ref())?;
+//! let file = File::open("model.bin")?;
+//! let bytes = file.read_at(0, 4096)?;
 //! # Ok::<(), std::io::Error>(())
 //! ```
 
 pub mod buffer;
 pub mod range;
-pub mod traits;
 pub mod write;
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
-pub mod io_uring;
+mod io_uring;
 #[cfg(feature = "mmap")]
 pub mod mmap;
 #[cfg(feature = "sync")]
 pub mod sync;
 #[cfg(feature = "tokio")]
 pub mod tokio;
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+pub mod uring;
 
 pub use std::io::Result as IoResult;
 pub use std::io::{Error, Result};
@@ -46,20 +47,7 @@ pub use buffer::MmapRegion;
 #[cfg(feature = "pool")]
 pub use buffer::PoolConfig;
 pub use buffer::{BufferAllocator, OwnedBytes};
-#[cfg(all(target_os = "linux", feature = "io-uring"))]
-pub use io_uring::{IoUring, IoUringOptions};
-#[cfg(feature = "mmap")]
-pub use mmap::Mmap;
 pub use range::{ByteRange, FileRange, RangeRead, RequestIndex};
-#[cfg(feature = "sync")]
-pub use sync::{DirectIo, SyncIo, SyncOptions};
-#[cfg(feature = "tokio")]
-pub use tokio::{Tokio, TokioOptions};
-#[cfg(feature = "tokio")]
-pub use traits::AsyncIo;
-pub use traits::BlockingIo;
-#[cfg(feature = "mmap")]
-pub use traits::MmapIo;
 pub use write::{WriteSlice, WriteSlices};
 
 #[cfg(all(test, feature = "tokio"))]

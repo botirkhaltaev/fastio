@@ -4,7 +4,7 @@ Guidelines for AI agents working on `fastio`.
 
 ## Project Overview
 
-`fastio` is a Rust library that exposes raw file I/O backends. It should stay format-agnostic: no checkpoint, tensor, or serialization logic belongs here.
+`fastio` is a Rust library that exposes explicit file I/O backend modules. It should stay format-agnostic: no checkpoint, tensor, or serialization logic belongs here.
 
 ## Build & Test
 
@@ -18,10 +18,11 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## Architecture Rules
 
-- Keep the public API small: `BlockingIo`, `AsyncIo`, `MmapIo`, range/write vocabulary, and backend config types.
+- Keep the public API small and backend-qualified: `sync::File`, `tokio::File`, `mmap::File`, Linux `uring::File`, their `OpenOptions`, and shared byte/write vocabulary.
+- Do not add a root default `File`, root `OpenOptions`, or root `read`/`write`; users must opt into a backend module.
 - Do not reintroduce a public availability API or backend identity trait. Platform and runtime failures should be returned by the I/O operation.
 - Keep `tokio` independent from Rayon. Tokio batch writes use scoped threads inside `block_in_place`.
-- Keep Rayon usage inside the `sync` feature only.
+- Do not add Rayon unless there is a measured backend-specific need.
 - Gate optional storage types and APIs with their features (`mmap`, `pool`, `tokio`, `io-uring`).
 
 ## Style
