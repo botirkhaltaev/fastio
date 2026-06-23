@@ -6,9 +6,7 @@
 //!
 //! Run with: `cargo bench --all-features`
 
-use criterion::{
-    BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
-};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::io::{Read, Write};
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
@@ -416,9 +414,7 @@ fn bench_write_slices(c: &mut Criterion) {
                 let slices: Vec<fastio::write::WriteSlice<'_>> = slices_data
                     .iter()
                     .enumerate()
-                    .map(|(i, data)| {
-                        fastio::write::WriteSlice::new((i * spacing) as u64, data)
-                    })
+                    .map(|(i, data)| fastio::write::WriteSlice::new((i * spacing) as u64, data))
                     .collect();
                 let writes = fastio::WriteSlices::new(&slices).unwrap();
                 file.write_slices_at(writes).unwrap();
@@ -437,9 +433,7 @@ fn bench_write_slices(c: &mut Criterion) {
                     let slices: Vec<fastio::write::WriteSlice<'_>> = slices_data
                         .iter()
                         .enumerate()
-                        .map(|(i, data)| {
-                            fastio::write::WriteSlice::new((i * spacing) as u64, data)
-                        })
+                        .map(|(i, data)| fastio::write::WriteSlice::new((i * spacing) as u64, data))
                         .collect();
                     let writes = fastio::WriteSlices::new(&slices).unwrap();
                     file.write_slices_at(writes).unwrap();
@@ -461,9 +455,7 @@ fn bench_write_slices(c: &mut Criterion) {
                     let slices: Vec<fastio::write::WriteSlice<'_>> = slices_data
                         .iter()
                         .enumerate()
-                        .map(|(i, data)| {
-                            fastio::write::WriteSlice::new((i * spacing) as u64, data)
-                        })
+                        .map(|(i, data)| fastio::write::WriteSlice::new((i * spacing) as u64, data))
                         .collect();
                     let writes = fastio::WriteSlices::new(&slices).unwrap();
                     file.write_slices_at(writes).await.unwrap();
@@ -806,10 +798,7 @@ fn bench_cursor_write(c: &mut Criterion) {
         // --- std::fs::File via Write trait ---
         group.bench_function(BenchmarkId::new("std_fs_write_trait", label), |b| {
             b.iter(|| {
-                let mut f = std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(&path)
-                    .unwrap();
+                let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
                 let mut remaining = size as usize;
                 while remaining > 0 {
                     let n = remaining.min(chunk.len());
