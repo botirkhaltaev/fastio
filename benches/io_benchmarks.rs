@@ -6,9 +6,10 @@
 //!
 //! Run with: `cargo bench --all-features`
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{
+    BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
+};
 use std::io::{Read, Write};
-#[cfg(unix)]
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 
@@ -64,7 +65,6 @@ impl Fixture {
 // io_uring availability guard (matches the crate's test pattern)
 // ---------------------------------------------------------------------------
 
-#[cfg(all(target_os = "linux", feature = "io-uring"))]
 fn uring_available() -> bool {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("probe.bin");
@@ -167,7 +167,6 @@ fn bench_read_all(c: &mut Criterion) {
         });
 
         // --- fastio::uring::File::read_all ---
-        #[cfg(all(target_os = "linux", feature = "io-uring"))]
         if uring_available() {
             group.bench_function(BenchmarkId::new("fastio_uring", label), |b| {
                 let file = fastio::uring::File::open(&path).unwrap();
@@ -222,7 +221,6 @@ fn bench_read_at(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(READ_AT_LEN as u64));
 
         // --- std::os::unix::fs::FileExt::read_exact_at ---
-        #[cfg(unix)]
         group.bench_function(BenchmarkId::new("std_pread", label), |b| {
             let file = std::fs::File::open(&path).unwrap();
             let mut buf = vec![0u8; READ_AT_LEN];
@@ -277,7 +275,6 @@ fn bench_read_at(c: &mut Criterion) {
         });
 
         // --- fastio::uring::File::read_at ---
-        #[cfg(all(target_os = "linux", feature = "io-uring"))]
         if uring_available() {
             group.bench_function(BenchmarkId::new("fastio_uring", label), |b| {
                 let file = fastio::uring::File::open(&path).unwrap();
@@ -321,7 +318,6 @@ fn bench_write_all_at(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(WRITE_PAYLOAD as u64));
 
         // --- std::os::unix::fs::FileExt::write_all_at ---
-        #[cfg(unix)]
         group.bench_function(BenchmarkId::new("std_pwrite", label), |b| {
             let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
             b.iter(|| {
@@ -343,7 +339,6 @@ fn bench_write_all_at(c: &mut Criterion) {
         });
 
         // --- fastio::uring::File::write_all_at ---
-        #[cfg(all(target_os = "linux", feature = "io-uring"))]
         if uring_available() {
             group.bench_function(BenchmarkId::new("fastio_uring", label), |b| {
                 let file = fastio::uring::File::options()
@@ -400,7 +395,6 @@ fn bench_write_slices(c: &mut Criterion) {
         let spacing = (size as usize) / WRITE_SLICES_COUNT;
 
         // --- std manual pwrite loop ---
-        #[cfg(unix)]
         group.bench_function(BenchmarkId::new("std_pwrite_loop", label), |b| {
             let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
             b.iter(|| {
@@ -422,7 +416,9 @@ fn bench_write_slices(c: &mut Criterion) {
                 let slices: Vec<fastio::write::WriteSlice<'_>> = slices_data
                     .iter()
                     .enumerate()
-                    .map(|(i, data)| fastio::write::WriteSlice::new((i * spacing) as u64, data))
+                    .map(|(i, data)| {
+                        fastio::write::WriteSlice::new((i * spacing) as u64, data)
+                    })
                     .collect();
                 let writes = fastio::WriteSlices::new(&slices).unwrap();
                 file.write_slices_at(writes).unwrap();
@@ -431,7 +427,6 @@ fn bench_write_slices(c: &mut Criterion) {
         });
 
         // --- fastio::uring::File::write_slices_at ---
-        #[cfg(all(target_os = "linux", feature = "io-uring"))]
         if uring_available() {
             group.bench_function(BenchmarkId::new("fastio_uring", label), |b| {
                 let file = fastio::uring::File::options()
@@ -442,7 +437,9 @@ fn bench_write_slices(c: &mut Criterion) {
                     let slices: Vec<fastio::write::WriteSlice<'_>> = slices_data
                         .iter()
                         .enumerate()
-                        .map(|(i, data)| fastio::write::WriteSlice::new((i * spacing) as u64, data))
+                        .map(|(i, data)| {
+                            fastio::write::WriteSlice::new((i * spacing) as u64, data)
+                        })
                         .collect();
                     let writes = fastio::WriteSlices::new(&slices).unwrap();
                     file.write_slices_at(writes).unwrap();
@@ -464,7 +461,9 @@ fn bench_write_slices(c: &mut Criterion) {
                     let slices: Vec<fastio::write::WriteSlice<'_>> = slices_data
                         .iter()
                         .enumerate()
-                        .map(|(i, data)| fastio::write::WriteSlice::new((i * spacing) as u64, data))
+                        .map(|(i, data)| {
+                            fastio::write::WriteSlice::new((i * spacing) as u64, data)
+                        })
                         .collect();
                     let writes = fastio::WriteSlices::new(&slices).unwrap();
                     file.write_slices_at(writes).await.unwrap();
@@ -769,7 +768,6 @@ fn bench_cursor_read(c: &mut Criterion) {
         });
 
         // --- fastio::uring::File via Read trait ---
-        #[cfg(all(target_os = "linux", feature = "io-uring"))]
         if uring_available() {
             group.bench_function(BenchmarkId::new("fastio_uring_read_trait", label), |b| {
                 b.iter(|| {
@@ -808,7 +806,10 @@ fn bench_cursor_write(c: &mut Criterion) {
         // --- std::fs::File via Write trait ---
         group.bench_function(BenchmarkId::new("std_fs_write_trait", label), |b| {
             b.iter(|| {
-                let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap();
                 let mut remaining = size as usize;
                 while remaining > 0 {
                     let n = remaining.min(chunk.len());
@@ -837,7 +838,6 @@ fn bench_cursor_write(c: &mut Criterion) {
         });
 
         // --- fastio::uring::File via Write trait ---
-        #[cfg(all(target_os = "linux", feature = "io-uring"))]
         if uring_available() {
             group.bench_function(BenchmarkId::new("fastio_uring_write_trait", label), |b| {
                 b.iter(|| {
