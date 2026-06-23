@@ -30,12 +30,13 @@ impl<'a> WriteSlice<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct WriteSlices<'a>(&'a [WriteSlice<'a>]);
+pub struct WriteSlices<'s, 'd>(&'s [WriteSlice<'d>]);
 
-impl<'a> WriteSlices<'a> {
-    pub fn new(slices: &'a [WriteSlice<'a>]) -> IoResult<Self> {
+impl<'s, 'd> WriteSlices<'s, 'd> {
+    pub fn new(slices: &'s [WriteSlice<'d>]) -> IoResult<Self> {
         let mut sorted: Vec<(u64, u64)> = slices
             .iter()
+            .filter(|w| !w.data.is_empty())
             .map(|w| w.end_offset().map(|end| (w.offset, end)))
             .collect::<IoResult<_>>()?;
         sorted.sort_unstable_by_key(|&(start, _)| start);
@@ -49,7 +50,7 @@ impl<'a> WriteSlices<'a> {
 
     #[inline]
     #[must_use]
-    pub const fn as_slice(self) -> &'a [WriteSlice<'a>] {
+    pub const fn as_slice(self) -> &'s [WriteSlice<'d>] {
         self.0
     }
 
@@ -82,5 +83,12 @@ mod tests {
         let b = WriteSlice::new(3, b"BBBBB");
         let err = WriteSlices::new(&[a, b]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn write_slices_allows_empty_slice_inside_non_empty_range() {
+        let a = WriteSlice::new(0, b"AAAAA");
+        let b = WriteSlice::new(3, b"");
+        assert!(WriteSlices::new(&[a, b]).is_ok());
     }
 }

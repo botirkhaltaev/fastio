@@ -89,22 +89,4 @@ mod file_api_tests {
 
         assert_eq!(std::fs::read(&path).unwrap(), b"abXXef");
     }
-
-    #[test]
-    fn open_options_direct_io_errors_on_non_linux() {
-        #[cfg(not(target_os = "linux"))]
-        {
-            let dir = TempDir::new().unwrap();
-            let path = dir.path().join("model.bin");
-            std::fs::write(&path, b"abcdef").unwrap();
-
-            let err = OpenOptions::new()
-                .read(true)
-                .direct_io(true)
-                .open(&path)
-                .unwrap_err();
-
-            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-        }
-    }
 }

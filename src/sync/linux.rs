@@ -1,6 +1,6 @@
 use std::fs::{Metadata, Permissions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{FileExt, OpenOptionsExt};
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use crate::{Allocator, DefaultAllocator, OwnedBytes, WriteSlices};
@@ -64,9 +64,7 @@ impl<A: Allocator> File<A> {
     }
 
     pub fn read_all(&self) -> io::Result<OwnedBytes> {
-        let mut file = self.inner.try_clone()?;
-        file.seek(SeekFrom::Start(0))?;
-        let len = usize::try_from(file.metadata()?.len())
+        let len = usize::try_from(self.inner.metadata()?.len())
             .map_err(|_| io::Error::other("file too large"))?;
         if len == 0 {
             return Ok(OwnedBytes::Vec(Vec::new()));
@@ -78,7 +76,7 @@ impl<A: Allocator> File<A> {
         if buf.len() != len {
             return Err(io::Error::other("allocator returned wrong-sized buffer"));
         }
-        file.read_exact(buf)?;
+        self.read_exact_at(0, buf)?;
         Ok(bytes)
     }
 
@@ -105,7 +103,7 @@ impl<A: Allocator> File<A> {
         self.inner.write_all_at(buf, offset)
     }
 
-    pub fn write_slices_at(&self, writes: WriteSlices<'_>) -> io::Result<()> {
+    pub fn write_slices_at(&self, writes: WriteSlices<'_, '_>) -> io::Result<()> {
         for write in writes.as_slice() {
             self.write_all_at(write.offset, write.data)?;
         }
@@ -144,7 +142,6 @@ impl<A> AsRef<std::fs::File> for File<A> {
 #[derive(Debug, Clone)]
 pub struct OpenOptions<A = DefaultAllocator> {
     inner: std::fs::OpenOptions,
-    direct_io: bool,
     allocator: A,
 }
 
@@ -153,7 +150,6 @@ impl OpenOptions<DefaultAllocator> {
     pub fn new() -> Self {
         Self {
             inner: std::fs::OpenOptions::new(),
-            direct_io: false,
             allocator: DefaultAllocator::default(),
         }
     }
@@ -190,26 +186,16 @@ impl<A: Allocator> OpenOptions<A> {
         self
     }
 
-    pub fn direct_io(&mut self, enabled: bool) -> &mut Self {
-        self.direct_io = enabled;
-        self
-    }
-
     pub fn allocator<B: Allocator>(&self, allocator: B) -> OpenOptions<B> {
         OpenOptions {
             inner: self.inner.clone(),
-            direct_io: self.direct_io,
             allocator,
         }
     }
 
     pub fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File<A>> {
-        let mut options = self.inner.clone();
-        if self.direct_io {
-            options.custom_flags(libc::O_DIRECT);
-        }
         Ok(File {
-            inner: options.open(path)?,
+            inner: self.inner.open(path)?,
             allocator: self.allocator.clone(),
         })
     }

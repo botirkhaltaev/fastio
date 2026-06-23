@@ -41,6 +41,10 @@ let bytes = file.read_at(0, 4096)?;
 ## Development
 
 ```bash
+cargo fmt --all -- --check
+cargo check --all-targets
+cargo check --no-default-features --all-targets
+cargo check --no-default-features --features tokio --all-targets
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 ```

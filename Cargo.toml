@@ -11,7 +11,7 @@ categories = ["filesystem", "asynchronous", "concurrency"]
 
 [features]
 default = ["sync", "mmap", "pool", "tokio", "io-uring"]
-sync = ["dep:libc"]
+sync = []
 mmap = ["dep:memmap2", "dep:region"]
 pool = ["dep:zeropool"]
 tokio = ["dep:tokio"]

@@ -146,33 +146,29 @@ impl<A: Allocator> File<A> {
 
     /// Reads exactly enough bytes to fill `buf` at `offset`.
     pub async fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        let file = self.inner.try_clone()?;
-        ::tokio::task::block_in_place(|| read_at_positioned(&file, offset, buf))
+        read_at_positioned(&self.inner, offset, buf)
     }
 
     /// Writes all bytes from `buf` at `offset`.
     pub async fn write_all_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
-        let file = self.inner.try_clone()?;
-        ::tokio::task::block_in_place(|| write_at_positioned(&file, offset, buf))
+        write_at_positioned(&self.inner, offset, buf)
     }
 
     /// Writes non-overlapping slices at their offsets.
-    pub async fn write_slices_at(&self, writes: WriteSlices<'_>) -> io::Result<()> {
-        let file = self.inner.try_clone()?;
-        ::tokio::task::block_in_place(|| {
-            std::thread::scope(|scope| {
-                let handles = writes
-                    .as_slice()
-                    .iter()
-                    .map(|w| scope.spawn(|| write_at_positioned(&file, w.offset, w.data)))
-                    .collect::<Vec<_>>();
-                for handle in handles {
-                    handle
-                        .join()
-                        .map_err(|_| io::Error::other("positioned write worker panicked"))??;
-                }
-                Ok(())
-            })
+    pub async fn write_slices_at(&self, writes: WriteSlices<'_, '_>) -> io::Result<()> {
+        let file = &self.inner;
+        std::thread::scope(|scope| {
+            let handles = writes
+                .as_slice()
+                .iter()
+                .map(|w| scope.spawn(|| write_at_positioned(file, w.offset, w.data)))
+                .collect::<Vec<_>>();
+            for handle in handles {
+                handle
+                    .join()
+                    .map_err(|_| io::Error::other("positioned write worker panicked"))??;
+            }
+            Ok(())
         })
     }
 }
@@ -277,7 +273,10 @@ fn read_at_positioned(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> IoRe
     use std::os::windows::fs::FileExt;
     let mut read = 0;
     while read < buf.len() {
-        let n = file.seek_read(&mut buf[read..], offset + read as u64)?;
+        let read_offset = offset
+            .checked_add(read as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "read offset overflow"))?;
+        let n = file.seek_read(&mut buf[read..], read_offset)?;
         if n == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -301,7 +300,16 @@ fn write_at_positioned(file: &std::fs::File, offset: u64, data: &[u8]) -> IoResu
     use std::os::windows::fs::FileExt;
     let mut written = 0;
     while written < data.len() {
-        let n = file.seek_write(&data[written..], offset + written as u64)?;
+        let write_offset = offset
+            .checked_add(written as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "write offset overflow"))?;
+        let n = file.seek_write(&data[written..], write_offset)?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "seek_write returned zero bytes",
+            ));
+        }
         written += n;
     }
     Ok(())

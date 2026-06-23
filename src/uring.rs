@@ -157,7 +157,7 @@ impl<A: Allocator> File<A> {
     }
 
     /// Writes non-overlapping slices at their offsets.
-    pub fn write_slices_at(&self, writes: WriteSlices<'_>) -> io::Result<()> {
+    pub fn write_slices_at(&self, writes: WriteSlices<'_, '_>) -> io::Result<()> {
         self.submit_write_slices_at(&self.inner, writes.as_slice())
     }
 
@@ -179,9 +179,10 @@ impl<A: Allocator> File<A> {
             let mut done = vec![0usize; num_chunks];
             let mut in_flight: u32 = 0;
             let mut next_submit = 0usize;
+            let mut pending_error: Option<io::Error> = None;
 
             loop {
-                while in_flight < depth && next_submit < num_chunks {
+                while pending_error.is_none() && in_flight < depth && next_submit < num_chunks {
                     let idx = next_submit;
                     let chunk_start = idx * chunk_size;
                     let chunk_end = total.min(chunk_start + chunk_size);
@@ -199,16 +200,18 @@ impl<A: Allocator> File<A> {
                     // memory until the CQE is consumed below, and `buf` outlives
                     // the ring borrow.
                     let ptr = unsafe { buf.as_mut_ptr().add(buf_offset) };
-                    let file_offset = offset + buf_offset as u64;
+                    let file_offset = offset.checked_add(buf_offset as u64).ok_or_else(|| {
+                        Error::new(ErrorKind::InvalidInput, "read offset overflow")
+                    })?;
                     let entry = opcode::Read::new(types::Fd(file.as_raw_fd()), ptr, len)
                         .offset(file_offset)
                         .build()
                         .user_data(idx as u64);
                     {
                         let mut sq = ring.submission();
-                        unsafe {
-                            sq.push(&entry)
-                                .map_err(|_| Error::other("io_uring SQ full"))?;
+                        if unsafe { sq.push(&entry) }.is_err() {
+                            pending_error.get_or_insert_with(|| Error::other("io_uring SQ full"));
+                            break;
                         }
                     }
                     in_flight += 1;
@@ -216,6 +219,9 @@ impl<A: Allocator> File<A> {
                 }
 
                 if in_flight == 0 {
+                    if let Some(err) = pending_error {
+                        return Err(err);
+                    }
                     break;
                 }
 
@@ -227,11 +233,15 @@ impl<A: Allocator> File<A> {
                     let idx = cqe.user_data() as usize;
                     let result = cqe.result();
                     if result < 0 {
-                        return Err(Error::from_raw_os_error(-result));
+                        pending_error.get_or_insert_with(|| Error::from_raw_os_error(-result));
+                        continue;
                     }
                     let n_read = result as usize;
                     if n_read == 0 {
-                        return Err(Error::new(ErrorKind::UnexpectedEof, "short io_uring read"));
+                        pending_error.get_or_insert_with(|| {
+                            Error::new(ErrorKind::UnexpectedEof, "short io_uring read")
+                        });
+                        continue;
                     }
                     done[idx] += n_read;
                     let chunk_start = idx * chunk_size;
@@ -265,9 +275,10 @@ impl<A: Allocator> File<A> {
             let mut done = vec![0usize; num_chunks];
             let mut in_flight: u32 = 0;
             let mut next_submit = 0usize;
+            let mut pending_error: Option<io::Error> = None;
 
             loop {
-                while in_flight < depth && next_submit < num_chunks {
+                while pending_error.is_none() && in_flight < depth && next_submit < num_chunks {
                     let idx = next_submit;
                     let chunk_start = idx * chunk_size;
                     let chunk_end = total.min(chunk_start + chunk_size);
@@ -282,16 +293,18 @@ impl<A: Allocator> File<A> {
                     let buf_offset = chunk_start + so_far;
                     // SAFETY: `buf_offset < total` and `data` outlives the ring borrow.
                     let ptr = unsafe { data.as_ptr().add(buf_offset) };
-                    let file_offset = offset + buf_offset as u64;
+                    let file_offset = offset.checked_add(buf_offset as u64).ok_or_else(|| {
+                        Error::new(ErrorKind::InvalidInput, "write offset overflow")
+                    })?;
                     let entry = opcode::Write::new(types::Fd(file.as_raw_fd()), ptr, len)
                         .offset(file_offset)
                         .build()
                         .user_data(idx as u64);
                     {
                         let mut sq = ring.submission();
-                        unsafe {
-                            sq.push(&entry)
-                                .map_err(|_| Error::other("io_uring SQ full"))?;
+                        if unsafe { sq.push(&entry) }.is_err() {
+                            pending_error.get_or_insert_with(|| Error::other("io_uring SQ full"));
+                            break;
                         }
                     }
                     in_flight += 1;
@@ -299,6 +312,9 @@ impl<A: Allocator> File<A> {
                 }
 
                 if in_flight == 0 {
+                    if let Some(err) = pending_error {
+                        return Err(err);
+                    }
                     break;
                 }
 
@@ -310,11 +326,15 @@ impl<A: Allocator> File<A> {
                     let idx = cqe.user_data() as usize;
                     let result = cqe.result();
                     if result < 0 {
-                        return Err(Error::from_raw_os_error(-result));
+                        pending_error.get_or_insert_with(|| Error::from_raw_os_error(-result));
+                        continue;
                     }
                     let n_written = result as usize;
                     if n_written == 0 {
-                        return Err(Error::new(ErrorKind::WriteZero, "short io_uring write"));
+                        pending_error.get_or_insert_with(|| {
+                            Error::new(ErrorKind::WriteZero, "short io_uring write")
+                        });
+                        continue;
                     }
                     done[idx] += n_written;
                     let chunk_start = idx * chunk_size;
@@ -344,9 +364,10 @@ impl<A: Allocator> File<A> {
             let mut done = vec![0usize; n];
             let mut in_flight: u32 = 0;
             let mut next_submit = 0usize;
+            let mut pending_error: Option<io::Error> = None;
 
             loop {
-                while in_flight < depth && next_submit < n {
+                while pending_error.is_none() && in_flight < depth && next_submit < n {
                     let idx = next_submit;
                     let write = &writes[idx];
                     let so_far = done[idx];
@@ -359,15 +380,18 @@ impl<A: Allocator> File<A> {
                     // SAFETY: `write.data` is tied to the caller's `WriteSlice`,
                     // and `writes` outlives the ring borrow.
                     let ptr = unsafe { write.data.as_ptr().add(so_far) };
+                    let file_offset = write.offset.checked_add(so_far as u64).ok_or_else(|| {
+                        Error::new(ErrorKind::InvalidInput, "write offset overflow")
+                    })?;
                     let entry = opcode::Write::new(types::Fd(file.as_raw_fd()), ptr, len)
-                        .offset(write.offset + so_far as u64)
+                        .offset(file_offset)
                         .build()
                         .user_data(idx as u64);
                     {
                         let mut sq = ring.submission();
-                        unsafe {
-                            sq.push(&entry)
-                                .map_err(|_| Error::other("io_uring SQ full"))?;
+                        if unsafe { sq.push(&entry) }.is_err() {
+                            pending_error.get_or_insert_with(|| Error::other("io_uring SQ full"));
+                            break;
                         }
                     }
                     in_flight += 1;
@@ -375,6 +399,9 @@ impl<A: Allocator> File<A> {
                 }
 
                 if in_flight == 0 {
+                    if let Some(err) = pending_error {
+                        return Err(err);
+                    }
                     break;
                 }
 
@@ -386,11 +413,15 @@ impl<A: Allocator> File<A> {
                     let idx = cqe.user_data() as usize;
                     let result = cqe.result();
                     if result < 0 {
-                        return Err(Error::from_raw_os_error(-result));
+                        pending_error.get_or_insert_with(|| Error::from_raw_os_error(-result));
+                        continue;
                     }
                     let n_written = result as usize;
                     if n_written == 0 {
-                        return Err(Error::new(ErrorKind::WriteZero, "short io_uring write"));
+                        pending_error.get_or_insert_with(|| {
+                            Error::new(ErrorKind::WriteZero, "short io_uring write")
+                        });
+                        continue;
                     }
                     done[idx] += n_written;
                     if done[idx] < writes[idx].data.len() && next_submit > idx {

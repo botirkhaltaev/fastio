@@ -1,7 +1,7 @@
 //! Owned byte buffer types for storage I/O.
 //!
 //! [`OwnedBytes`] is a zero-copy owned byte container that can be backed by
-//! pooled, aligned, memory-mapped, or plain `Vec` storage. All variants
+//! pooled, memory-mapped, or plain `Vec` storage. All variants
 //! implement `AsRef<[u8]>` and `Deref<Target = [u8]>` for uniform read access.
 //!
 //! # Buffer allocation
@@ -16,110 +16,7 @@ use std::sync::Arc;
 #[cfg(feature = "pool")]
 use zeropool::BufferPool;
 #[cfg(feature = "pool")]
-pub(crate) use zeropool::PooledBuffer;
-
-// ============================================================================
-// AlignedBuffer — O_DIRECT aligned heap buffer (Linux only)
-// ============================================================================
-
-/// A page-aligned buffer for O_DIRECT I/O (Linux only).
-#[cfg(target_os = "linux")]
-pub struct AlignedBuffer {
-    ptr: std::ptr::NonNull<u8>,
-    layout: std::alloc::Layout,
-    len: usize,
-}
-
-#[cfg(target_os = "linux")]
-impl AlignedBuffer {
-    const BLOCK_SIZE: usize = 4096;
-
-    pub fn new(capacity: usize) -> std::io::Result<Self> {
-        if capacity == 0 {
-            let layout = std::alloc::Layout::from_size_align(0, 1).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid alloc layout")
-            })?;
-            return Ok(Self {
-                ptr: std::ptr::NonNull::dangling(),
-                layout,
-                len: 0,
-            });
-        }
-        let layout =
-            std::alloc::Layout::from_size_align(capacity, Self::BLOCK_SIZE).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid alloc layout")
-            })?;
-        // SAFETY: layout was constructed by Layout::from_size_align and is valid
-        // for allocation.
-        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
-        if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
-        }
-        Ok(Self {
-            ptr: std::ptr::NonNull::new(ptr).unwrap(),
-            layout,
-            len: 0,
-        })
-    }
-
-    pub fn as_slice(&self) -> &[u8] {
-        // SAFETY: ptr is valid for at least self.len bytes, and set_len prevents
-        // exposing bytes beyond the allocated layout size.
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
-    }
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        // SAFETY: &mut self guarantees unique access, and ptr is valid for
-        // self.len bytes by the same invariant as as_slice.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
-    }
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.ptr.as_ptr()
-    }
-    pub fn set_len(&mut self, len: usize) {
-        assert!(len <= self.layout.size());
-        self.len = len;
-    }
-    pub fn capacity(&self) -> usize {
-        self.layout.size()
-    }
-    pub const fn len(&self) -> usize {
-        self.len
-    }
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for AlignedBuffer {
-    fn drop(&mut self) {
-        if self.layout.size() > 0 {
-            // SAFETY: ptr was allocated with this exact layout in AlignedBuffer::new.
-            unsafe { std::alloc::dealloc(self.ptr.as_ptr(), self.layout) }
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl std::fmt::Debug for AlignedBuffer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AlignedBuffer")
-            .field("len", &self.len)
-            .field("capacity", &self.capacity())
-            .finish()
-    }
-}
-
-#[cfg(target_os = "linux")]
-// SAFETY: AlignedBuffer owns its allocation exclusively and only exposes
-// shared/mutable access through Rust references; moving it to another thread
-// transfers ownership of the allocation.
-unsafe impl Send for AlignedBuffer {}
-
-#[cfg(target_os = "linux")]
-// SAFETY: &AlignedBuffer only provides &[u8] access (via Deref). Immutable
-// byte slices are trivially safe to share across threads.
-unsafe impl Sync for AlignedBuffer {}
+pub use zeropool::PooledBuffer;
 
 // ============================================================================
 // MmapRegion — Arc-backed memory-mapped file region
@@ -257,14 +154,11 @@ pub(crate) fn get_buffer_pool() -> &'static BufferPool {
 /// Owned byte buffer backed by one of several storage strategies.
 ///
 /// All variants provide uniform read access via `AsRef<[u8]>` / `Deref`.
-/// Only the `Pooled`, `Aligned`, and `Vec` variants support mutable access.
+/// Only the `Pooled` and `Vec` variants support mutable access.
 pub enum OwnedBytes {
     /// A buffer returned from the global [`BufferPool`].
     #[cfg(feature = "pool")]
     Pooled(PooledBuffer),
-    /// An O_DIRECT aligned buffer (Linux only).
-    #[cfg(target_os = "linux")]
-    Aligned(AlignedBuffer),
     /// A memory-mapped file region (zero-copy, read-only).
     #[cfg(feature = "mmap")]
     Mmap(MmapRegion),
@@ -281,14 +175,6 @@ impl OwnedBytes {
         Self::Pooled(buf)
     }
 
-    /// Wrap an O_DIRECT aligned buffer (Linux only).
-    #[cfg(target_os = "linux")]
-    #[inline]
-    #[must_use]
-    pub fn from_aligned(buf: AlignedBuffer) -> Self {
-        Self::Aligned(buf)
-    }
-
     /// Wrap a plain `Vec<u8>`.
     #[inline]
     #[must_use]
@@ -303,8 +189,6 @@ impl OwnedBytes {
         match self {
             #[cfg(feature = "pool")]
             Self::Pooled(b) => b.len(),
-            #[cfg(target_os = "linux")]
-            Self::Aligned(b) => b.len(),
             #[cfg(feature = "mmap")]
             Self::Mmap(b) => b.len(),
             Self::Vec(b) => b.len(),
@@ -327,8 +211,6 @@ impl OwnedBytes {
         match self {
             #[cfg(feature = "pool")]
             Self::Pooled(b) => Some(b.as_mut_slice()),
-            #[cfg(target_os = "linux")]
-            Self::Aligned(b) => Some(b.as_mut_slice()),
             #[cfg(feature = "mmap")]
             Self::Mmap(_) => None,
             Self::Vec(b) => Some(b.as_mut_slice()),
@@ -337,15 +219,12 @@ impl OwnedBytes {
 
     /// Convert to a `Vec<u8>`.
     ///
-    /// Copies when backed by `Aligned` or `Mmap` storage to avoid
-    /// mismatched-allocator UB.
+    /// Copies when backed by `Mmap` storage to avoid mismatched-allocator UB.
     #[must_use]
     pub fn into_vec(self) -> Vec<u8> {
         match self {
             #[cfg(feature = "pool")]
             Self::Pooled(b) => b.into_inner(),
-            #[cfg(target_os = "linux")]
-            Self::Aligned(b) => b.as_slice().to_vec(),
             #[cfg(feature = "mmap")]
             Self::Mmap(b) => b.as_slice().to_vec(),
             Self::Vec(b) => b,
@@ -354,14 +233,12 @@ impl OwnedBytes {
 
     /// Convert to an `Arc<[u8]>`.
     ///
-    /// Copies when backed by `Aligned` or `Mmap` storage.
+    /// Copies when backed by `Mmap` storage.
     #[must_use]
     pub fn into_shared(self) -> Arc<[u8]> {
         match self {
             #[cfg(feature = "pool")]
             Self::Pooled(b) => b.into_inner().into(),
-            #[cfg(target_os = "linux")]
-            Self::Aligned(b) => b.as_slice().into(),
             #[cfg(feature = "mmap")]
             Self::Mmap(b) => Arc::from(b.as_slice()),
             Self::Vec(b) => b.into(),
@@ -375,8 +252,6 @@ impl AsRef<[u8]> for OwnedBytes {
         match self {
             #[cfg(feature = "pool")]
             Self::Pooled(b) => b.as_ref(),
-            #[cfg(target_os = "linux")]
-            Self::Aligned(b) => b.as_slice(),
             #[cfg(feature = "mmap")]
             Self::Mmap(b) => b.as_slice(),
             Self::Vec(b) => b.as_ref(),
@@ -421,14 +296,6 @@ impl From<MmapRegion> for OwnedBytes {
     #[inline]
     fn from(region: MmapRegion) -> Self {
         Self::Mmap(region)
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl From<AlignedBuffer> for OwnedBytes {
-    #[inline]
-    fn from(buf: AlignedBuffer) -> Self {
-        Self::Aligned(buf)
     }
 }
 

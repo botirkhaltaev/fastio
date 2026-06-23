@@ -48,8 +48,10 @@ impl File {
         if len == 0 {
             return Err(Error::new(ErrorKind::InvalidData, "cannot mmap empty file"));
         }
-        // SAFETY: the file is opened read-only and remains alive for the mapping
-        // call; memmap2 owns the mapping after creation.
+        // SAFETY: the file is opened read-only and remains alive for the map
+        // call; memmap2 owns the mapping after creation. As with all mmap APIs,
+        // external truncation or mutation of the file can still fault when the
+        // mapping is accessed.
         let inner = unsafe { MemmapOptions::new().map(&self.inner)? };
         Ok(MmapRegion::new(Arc::new(inner), 0, len))
     }
@@ -91,7 +93,9 @@ impl File {
             .checked_add(start)
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "mapping length overflow"))?;
         // SAFETY: the requested range has been bounds-checked against file_len,
-        // and the offset passed to memmap2 is page-aligned as required.
+        // and the offset passed to memmap2 is page-aligned as required. As with
+        // all mmap APIs, external truncation or mutation can still fault when
+        // the mapping is accessed.
         let inner = unsafe {
             MemmapOptions::new()
                 .offset(aligned_offset)

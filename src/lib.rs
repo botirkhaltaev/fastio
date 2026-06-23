@@ -36,12 +36,12 @@ pub mod tokio;
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 pub mod uring;
 
+pub use std::io::Error;
 pub use std::io::Result as IoResult;
-pub use std::io::{Error, Result};
 
 #[cfg(feature = "mmap")]
 pub use buffer::MmapRegion;
-#[cfg(feature = "pool")]
-pub use buffer::Pool;
 pub use buffer::{Allocator, DefaultAllocator, OwnedBytes, System};
+#[cfg(feature = "pool")]
+pub use buffer::{Pool, PooledBuffer};
 pub use write::{WriteSlice, WriteSlices};
