@@ -83,8 +83,7 @@ impl File {
         if len == 0 {
             return Ok(OwnedBytes::Vec(Vec::new()));
         }
-        let mut bytes = Vec::with_capacity(len);
-        bytes.resize(len, 0);
+        let mut bytes = vec![0; len];
         self.backend.read_exact_at(&self.inner, 0, &mut bytes)?;
         Ok(OwnedBytes::Vec(bytes))
     }
