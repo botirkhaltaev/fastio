@@ -7,7 +7,6 @@
 - `sync/`: `std::fs`-like synchronous backend.
 - `tokio/`: `tokio::fs`-like async backend.
 - `mmap.rs`: read-only memory mapping file backend.
-- `io_uring.rs`: internal Linux `io_uring` primitives.
-- `uring.rs`: public Linux `io_uring` file backend.
+- `uring.rs`: Linux `io_uring` file backend and ring implementation.
 
 The crate root exports backend modules and shared value types, but no default file backend or backend free functions.

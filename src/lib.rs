@@ -27,8 +27,6 @@
 pub mod buffer;
 pub mod write;
 
-#[cfg(all(target_os = "linux", feature = "io-uring"))]
-mod io_uring;
 #[cfg(feature = "mmap")]
 pub mod mmap;
 #[cfg(feature = "sync")]
