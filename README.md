@@ -13,6 +13,9 @@ Fast file I/O backends for Rust libraries and applications.
 - `pool`: pooled read buffers using `zeropool`.
 
 Default features enable all supported backends for the current platform.
+With `pool` enabled, read methods allocate from the process-wide pool by
+default and return `OwnedBytes::Pooled`. Use `System` on an `OpenOptions` value
+to force normal heap-backed `OwnedBytes::Vec` reads.
 
 ## Example
 
@@ -20,6 +23,17 @@ Default features enable all supported backends for the current platform.
 use fastio::sync::File;
 
 let file = File::open("model.bin")?;
+let bytes = file.read_at(0, 4096)?;
+# Ok::<(), std::io::Error>(())
+```
+
+```rust
+use fastio::{System, sync::File};
+
+let file = File::options()
+    .read(true)
+    .allocator(System)
+    .open("model.bin")?;
 let bytes = file.read_at(0, 4096)?;
 # Ok::<(), std::io::Error>(())
 ```

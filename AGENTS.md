@@ -25,6 +25,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 - Keep `tokio` independent from Rayon. Tokio batch writes use scoped threads inside `block_in_place`.
 - Do not add Rayon unless there is a measured backend-specific need.
 - Gate optional storage types and APIs with their features (`mmap`, `pool`, `tokio`, `io-uring`).
+- Reads must allocate through the configured `Allocator`. With `pool` enabled, default reads should return pooled buffers; direct `Vec` allocation in read paths is a regression unless the caller explicitly chose `System` or the read is zero-length.
 
 ## Style
 

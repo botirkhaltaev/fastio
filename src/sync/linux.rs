@@ -3,15 +3,16 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::Path;
 
-use crate::{OwnedBytes, WriteSlices};
+use crate::{Allocator, DefaultAllocator, OwnedBytes, WriteSlices};
 
 /// A synchronous Linux file handle.
 #[derive(Debug)]
-pub struct File {
+pub struct File<A = DefaultAllocator> {
     inner: std::fs::File,
+    allocator: A,
 }
 
-impl File {
+impl File<DefaultAllocator> {
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         OpenOptions::new().read(true).open(path)
     }
@@ -32,10 +33,13 @@ impl File {
     pub fn options() -> OpenOptions {
         OpenOptions::new()
     }
+}
 
+impl<A: Allocator> File<A> {
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             inner: self.inner.try_clone()?,
+            allocator: self.allocator.clone(),
         })
     }
 
@@ -67,18 +71,30 @@ impl File {
         if len == 0 {
             return Ok(OwnedBytes::Vec(Vec::new()));
         }
-        let mut bytes = Vec::with_capacity(len);
-        file.read_to_end(&mut bytes)?;
-        Ok(OwnedBytes::Vec(bytes))
+        let mut bytes = self.allocator.allocate(len);
+        let buf = bytes
+            .as_mut_slice()
+            .ok_or_else(|| io::Error::other("allocator returned immutable buffer"))?;
+        if buf.len() != len {
+            return Err(io::Error::other("allocator returned wrong-sized buffer"));
+        }
+        file.read_exact(buf)?;
+        Ok(bytes)
     }
 
     pub fn read_at(&self, offset: u64, len: usize) -> io::Result<OwnedBytes> {
         if len == 0 {
             return Ok(OwnedBytes::Vec(Vec::new()));
         }
-        let mut bytes = vec![0; len];
-        self.read_exact_at(offset, &mut bytes)?;
-        Ok(OwnedBytes::Vec(bytes))
+        let mut bytes = self.allocator.allocate(len);
+        let buf = bytes
+            .as_mut_slice()
+            .ok_or_else(|| io::Error::other("allocator returned immutable buffer"))?;
+        if buf.len() != len {
+            return Err(io::Error::other("allocator returned wrong-sized buffer"));
+        }
+        self.read_exact_at(offset, buf)?;
+        Ok(bytes)
     }
 
     pub fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
@@ -97,13 +113,13 @@ impl File {
     }
 }
 
-impl Read for File {
+impl<A> Read for File<A> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.read(buf)
     }
 }
 
-impl Write for File {
+impl<A> Write for File<A> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.inner.write(buf)
     }
@@ -113,33 +129,37 @@ impl Write for File {
     }
 }
 
-impl Seek for File {
+impl<A> Seek for File<A> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         self.inner.seek(pos)
     }
 }
 
-impl AsRef<std::fs::File> for File {
+impl<A> AsRef<std::fs::File> for File<A> {
     fn as_ref(&self) -> &std::fs::File {
         &self.inner
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct OpenOptions {
+pub struct OpenOptions<A = DefaultAllocator> {
     inner: std::fs::OpenOptions,
     direct_io: bool,
+    allocator: A,
 }
 
-impl OpenOptions {
+impl OpenOptions<DefaultAllocator> {
     #[must_use]
     pub fn new() -> Self {
         Self {
             inner: std::fs::OpenOptions::new(),
             direct_io: false,
+            allocator: DefaultAllocator::default(),
         }
     }
+}
 
+impl<A: Allocator> OpenOptions<A> {
     pub fn read(&mut self, read: bool) -> &mut Self {
         self.inner.read(read);
         self
@@ -175,18 +195,27 @@ impl OpenOptions {
         self
     }
 
-    pub fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
+    pub fn allocator<B: Allocator>(&self, allocator: B) -> OpenOptions<B> {
+        OpenOptions {
+            inner: self.inner.clone(),
+            direct_io: self.direct_io,
+            allocator,
+        }
+    }
+
+    pub fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File<A>> {
         let mut options = self.inner.clone();
         if self.direct_io {
             options.custom_flags(libc::O_DIRECT);
         }
         Ok(File {
             inner: options.open(path)?,
+            allocator: self.allocator.clone(),
         })
     }
 }
 
-impl Default for OpenOptions {
+impl Default for OpenOptions<DefaultAllocator> {
     fn default() -> Self {
         Self::new()
     }

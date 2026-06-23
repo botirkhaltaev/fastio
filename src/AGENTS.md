@@ -19,6 +19,12 @@ Guidelines for agents editing `src`.
 - Pool-backed buffers require `feature = "pool"`.
 - `io_uring` is Linux-only and requires `feature = "io-uring"`.
 
+## Allocation
+
+- Read-capable backends must use their configured `Allocator` for owned read buffers.
+- `DefaultAllocator` is `Pool` when `pool` is enabled and `System` otherwise.
+- Keep mmap separate from allocator-backed reads; mapped bytes are not pooled buffers.
+
 ## Validation
 
 Run at least:

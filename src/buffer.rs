@@ -4,11 +4,12 @@
 //! pooled, aligned, memory-mapped, or plain `Vec` storage. All variants
 //! implement `AsRef<[u8]>` and `Deref<Target = [u8]>` for uniform read access.
 //!
-//! # Buffer pool
+//! # Buffer allocation
 //!
-//! The process-wide buffer pool is configured via [`PoolConfig`]. Backends
-//! that have pooling enabled obtain buffers via the pool and return
-//! [`OwnedBytes::Pooled`]; when disabled they return [`OwnedBytes::Vec`].
+//! Read-capable backends allocate through [`Allocator`]. With the `pool` feature
+//! enabled, [`DefaultAllocator`] is [`Pool`] and reads return
+//! [`OwnedBytes::Pooled`]. Without `pool`, the default is [`System`] and reads
+//! return [`OwnedBytes::Vec`].
 
 use std::sync::Arc;
 
@@ -187,91 +188,64 @@ impl std::ops::Deref for MmapRegion {
 }
 
 // ============================================================================
-// BufferAllocator
+// Allocators
 // ============================================================================
 
-/// Configuration for the buffer pool used by [`BufferAllocator::Pooled`].
-#[cfg(feature = "pool")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PoolConfig {
-    /// Number of independent shards to reduce contention (default: 8).
-    pub num_shards: usize,
-    /// Thread-local cache capacity per thread (default: 4).
-    pub tls_cache_size: usize,
-    /// Maximum buffers retained per shard (default: 32).
-    pub max_per_shard: usize,
-    /// Minimum buffer size the pool will manage; smaller requests
-    /// bypass the pool and allocate directly (default: 1 MiB).
-    pub min_buffer_size: usize,
-}
-
-#[cfg(feature = "pool")]
-impl Default for PoolConfig {
-    fn default() -> Self {
-        Self {
-            num_shards: 8,
-            tls_cache_size: 4,
-            max_per_shard: 32,
-            min_buffer_size: 1024 * 1024,
-        }
-    }
-}
-
-/// Controls how I/O backends allocate read buffers.
+/// Allocates mutable buffers for read-capable backends.
 ///
-/// - [`Pooled`](Self::Pooled): Reuses buffers from a process-wide pool,
-///   amortising allocation cost across repeated reads.
-/// - [`System`](Self::System): Every read allocates a fresh `Vec<u8>` via the
-///   system allocator and frees it on drop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BufferAllocator {
-    /// Reuse buffers from the process-wide pool.
-    #[cfg(feature = "pool")]
-    Pooled(PoolConfig),
-    /// Allocate fresh `Vec<u8>` buffers via the system allocator.
-    System,
-}
-
-impl Default for BufferAllocator {
-    fn default() -> Self {
-        #[cfg(feature = "pool")]
-        {
-            Self::Pooled(PoolConfig::default())
-        }
-        #[cfg(not(feature = "pool"))]
-        {
-            Self::System
-        }
-    }
-}
-
-impl BufferAllocator {
+/// Implementors must return an [`OwnedBytes`] variant with a mutable slice of
+/// exactly `len` bytes.
+pub trait Allocator: Clone + Send + Sync + std::fmt::Debug + 'static {
     /// Allocate a zeroed buffer of `len` bytes.
+    fn allocate(&self, len: usize) -> OwnedBytes;
+}
+
+/// Allocates plain heap buffers with `Vec<u8>`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct System;
+
+impl Allocator for System {
     #[inline]
-    pub fn alloc(&self, len: usize) -> OwnedBytes {
-        match self {
-            #[cfg(feature = "pool")]
-            Self::Pooled(_) => OwnedBytes::Pooled(get_buffer_pool().get(len)),
-            Self::System => OwnedBytes::Vec(vec![0u8; len]),
-        }
+    fn allocate(&self, len: usize) -> OwnedBytes {
+        OwnedBytes::Vec(vec![0u8; len])
     }
 }
+
+/// Allocates buffers from the process-wide pool.
+#[cfg(feature = "pool")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pool;
+
+#[cfg(feature = "pool")]
+impl Allocator for Pool {
+    #[inline]
+    fn allocate(&self, len: usize) -> OwnedBytes {
+        OwnedBytes::Pooled(get_buffer_pool().get(len))
+    }
+}
+
+/// Default read allocator for this build.
+#[cfg(feature = "pool")]
+pub type DefaultAllocator = Pool;
+
+/// Default read allocator for this build.
+#[cfg(not(feature = "pool"))]
+pub type DefaultAllocator = System;
 
 /// Returns the process-wide sharded buffer pool.
 ///
-/// Initialised on first call with [`PoolConfig::default`] settings.
+/// Initialised on first use with the default pool settings.
 #[cfg(feature = "pool")]
 #[must_use]
 pub(crate) fn get_buffer_pool() -> &'static BufferPool {
     use std::sync::OnceLock;
     static POOL: OnceLock<BufferPool> = OnceLock::new();
     POOL.get_or_init(|| {
-        let cfg = PoolConfig::default();
         BufferPool::builder()
-            .num_shards(cfg.num_shards)
-            .tls_cache_size(cfg.tls_cache_size)
-            .max_buffers_per_shard(cfg.max_per_shard)
-            .min_buffer_size(cfg.min_buffer_size)
+            .num_shards(8)
+            .tls_cache_size(4)
+            .max_buffers_per_shard(32)
+            .min_buffer_size(1024 * 1024)
             .build()
     })
 }

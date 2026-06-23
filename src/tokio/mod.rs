@@ -7,18 +7,19 @@ use std::fs::{Metadata, Permissions};
 use std::io;
 use std::path::Path;
 
-use crate::{IoResult, WriteSlices, buffer::OwnedBytes};
+use crate::{Allocator, DefaultAllocator, IoResult, OwnedBytes, WriteSlices};
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 compile_error!("fastio tokio supports Linux, macOS, and Windows only");
 
 /// A Tokio-backed file handle.
 #[derive(Debug)]
-pub struct File {
+pub struct File<A = DefaultAllocator> {
     inner: std::fs::File,
+    allocator: A,
 }
 
-impl File {
+impl File<DefaultAllocator> {
     /// Opens a file in read-only mode.
     pub async fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         OpenOptions::new().read(true).open(path).await
@@ -48,11 +49,16 @@ impl File {
     pub fn options() -> OpenOptions {
         OpenOptions::new()
     }
+}
 
+impl<A: Allocator> File<A> {
     /// Creates a new `File` instance sharing the same underlying handle.
     pub async fn try_clone(&self) -> io::Result<Self> {
         let file = self.inner.try_clone()?;
-        Ok(Self { inner: file })
+        Ok(Self {
+            inner: file,
+            allocator: self.allocator.clone(),
+        })
     }
 
     /// Queries metadata about the underlying file.
@@ -95,15 +101,22 @@ impl File {
     /// Reads the whole file into memory from offset 0.
     pub async fn read_all(&self) -> io::Result<OwnedBytes> {
         let file = self.inner.try_clone()?;
+        let allocator = self.allocator.clone();
         ::tokio::task::spawn_blocking(move || {
             let len = usize::try_from(file.metadata()?.len())
                 .map_err(|_| io::Error::other("file too large"))?;
             if len == 0 {
                 return Ok(OwnedBytes::Vec(Vec::new()));
             }
-            let mut bytes = vec![0; len];
-            read_at_positioned(&file, 0, &mut bytes)?;
-            Ok(OwnedBytes::Vec(bytes))
+            let mut bytes = allocator.allocate(len);
+            let buf = bytes
+                .as_mut_slice()
+                .ok_or_else(|| io::Error::other("allocator returned immutable buffer"))?;
+            if buf.len() != len {
+                return Err(io::Error::other("allocator returned wrong-sized buffer"));
+            }
+            read_at_positioned(&file, 0, buf)?;
+            Ok(bytes)
         })
         .await
         .map_err(io::Error::other)?
@@ -115,10 +128,17 @@ impl File {
             return Ok(OwnedBytes::Vec(Vec::new()));
         }
         let file = self.inner.try_clone()?;
+        let allocator = self.allocator.clone();
         ::tokio::task::spawn_blocking(move || {
-            let mut bytes = vec![0; len];
-            read_at_positioned(&file, offset, &mut bytes)?;
-            Ok(OwnedBytes::Vec(bytes))
+            let mut bytes = allocator.allocate(len);
+            let buf = bytes
+                .as_mut_slice()
+                .ok_or_else(|| io::Error::other("allocator returned immutable buffer"))?;
+            if buf.len() != len {
+                return Err(io::Error::other("allocator returned wrong-sized buffer"));
+            }
+            read_at_positioned(&file, offset, buf)?;
+            Ok(bytes)
         })
         .await
         .map_err(io::Error::other)?
@@ -157,7 +177,7 @@ impl File {
     }
 }
 
-impl AsRef<std::fs::File> for File {
+impl<A> AsRef<std::fs::File> for File<A> {
     fn as_ref(&self) -> &std::fs::File {
         &self.inner
     }
@@ -165,19 +185,23 @@ impl AsRef<std::fs::File> for File {
 
 /// Options and flags for opening a Tokio-backed file.
 #[derive(Debug, Clone)]
-pub struct OpenOptions {
+pub struct OpenOptions<A = DefaultAllocator> {
     inner: std::fs::OpenOptions,
+    allocator: A,
 }
 
-impl OpenOptions {
+impl OpenOptions<DefaultAllocator> {
     /// Creates a blank set of options.
     #[must_use]
     pub fn new() -> Self {
         Self {
             inner: std::fs::OpenOptions::new(),
+            allocator: DefaultAllocator::default(),
         }
     }
+}
 
+impl<A: Allocator> OpenOptions<A> {
     /// Sets read access.
     pub fn read(&mut self, read: bool) -> &mut Self {
         self.inner.read(read);
@@ -214,17 +238,28 @@ impl OpenOptions {
         self
     }
 
+    /// Sets the allocator used by reads on files opened with these options.
+    pub fn allocator<B: Allocator>(&self, allocator: B) -> OpenOptions<B> {
+        OpenOptions {
+            inner: self.inner.clone(),
+            allocator,
+        }
+    }
+
     /// Opens a file with the configured options.
-    pub async fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
+    pub async fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File<A>> {
         let path = path.as_ref().to_path_buf();
         let options = self.inner.clone();
-        ::tokio::task::spawn_blocking(move || options.open(path).map(|inner| File { inner }))
-            .await
-            .map_err(io::Error::other)?
+        let allocator = self.allocator.clone();
+        ::tokio::task::spawn_blocking(move || {
+            options.open(path).map(|inner| File { inner, allocator })
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 }
 
-impl Default for OpenOptions {
+impl Default for OpenOptions<DefaultAllocator> {
     fn default() -> Self {
         Self::new()
     }
@@ -275,7 +310,7 @@ fn write_at_positioned(file: &std::fs::File, offset: u64, data: &[u8]) -> IoResu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::WriteSlice;
+    use crate::{OwnedBytes, System, WriteSlice};
     use tempfile::TempDir;
 
     #[tokio::test(flavor = "multi_thread")]
@@ -306,6 +341,38 @@ mod tests {
         std::fs::write(&path, b"hello world").unwrap();
         let file = File::open(&path).await.unwrap();
         let result = file.read_at(6, 5).await.unwrap();
+        assert_eq!(result.as_ref(), b"world");
+    }
+
+    #[cfg(feature = "pool")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn default_allocator_returns_pooled_read_buffer() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("data.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+
+        let file = File::open(&path).await.unwrap();
+        let result = file.read_all().await.unwrap();
+
+        assert!(matches!(&result, OwnedBytes::Pooled(_)));
+        assert_eq!(result.as_ref(), b"hello world");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn system_allocator_returns_vec_read_buffer() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("data.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+
+        let file = OpenOptions::new()
+            .read(true)
+            .allocator(System)
+            .open(&path)
+            .await
+            .unwrap();
+        let result = file.read_at(6, 5).await.unwrap();
+
+        assert!(matches!(&result, OwnedBytes::Vec(_)));
         assert_eq!(result.as_ref(), b"world");
     }
 

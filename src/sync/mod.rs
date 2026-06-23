@@ -22,6 +22,7 @@ compile_error!("fastio sync supports Linux, macOS, and Windows only");
 #[cfg(test)]
 mod file_api_tests {
     use super::*;
+    use crate::{OwnedBytes, System};
     use tempfile::TempDir;
 
     #[test]
@@ -45,6 +46,36 @@ mod file_api_tests {
         let bytes = file.read_at(2, 3).unwrap();
 
         assert_eq!(bytes.as_ref(), b"cde");
+    }
+
+    #[cfg(feature = "pool")]
+    #[test]
+    fn default_allocator_returns_pooled_read_buffer() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+
+        let bytes = File::open(&path).unwrap().read_all().unwrap();
+
+        assert!(matches!(&bytes, OwnedBytes::Pooled(_)));
+        assert_eq!(bytes.as_ref(), b"abcdef");
+    }
+
+    #[test]
+    fn system_allocator_returns_vec_read_buffer() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+
+        let file = OpenOptions::new()
+            .read(true)
+            .allocator(System)
+            .open(&path)
+            .unwrap();
+        let bytes = file.read_at(1, 3).unwrap();
+
+        assert!(matches!(&bytes, OwnedBytes::Vec(_)));
+        assert_eq!(bytes.as_ref(), b"bcd");
     }
 
     #[test]

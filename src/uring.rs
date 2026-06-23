@@ -11,7 +11,7 @@ use std::path::Path;
 
 use io_uring::{IoUring, opcode, types};
 
-use crate::{OwnedBytes, WriteSlice, WriteSlices};
+use crate::{Allocator, DefaultAllocator, OwnedBytes, WriteSlice, WriteSlices};
 
 const DEFAULT_RING_DEPTH: u32 = 256;
 const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
@@ -42,13 +42,14 @@ fn with_ring<T>(depth: u32, f: impl FnOnce(&mut IoUring) -> io::Result<T>) -> io
 
 /// A Linux `io_uring` file handle.
 #[derive(Debug)]
-pub struct File {
+pub struct File<A = DefaultAllocator> {
     inner: std::fs::File,
     ring_depth: u32,
     chunk_size: usize,
+    allocator: A,
 }
 
-impl File {
+impl File<DefaultAllocator> {
     /// Opens a file in read-only mode.
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         OpenOptions::new().read(true).open(path)
@@ -73,13 +74,16 @@ impl File {
     pub fn options() -> OpenOptions {
         OpenOptions::new()
     }
+}
 
+impl<A: Allocator> File<A> {
     /// Creates a new `File` instance sharing the same underlying handle.
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             inner: self.inner.try_clone()?,
             ring_depth: self.ring_depth,
             chunk_size: self.chunk_size,
+            allocator: self.allocator.clone(),
         })
     }
 
@@ -115,9 +119,15 @@ impl File {
         if len == 0 {
             return Ok(OwnedBytes::Vec(Vec::new()));
         }
-        let mut bytes = vec![0; len];
-        self.submit_read_exact_at(&self.inner, 0, &mut bytes)?;
-        Ok(OwnedBytes::Vec(bytes))
+        let mut bytes = self.allocator.allocate(len);
+        let buf = bytes
+            .as_mut_slice()
+            .ok_or_else(|| io::Error::other("allocator returned immutable buffer"))?;
+        if buf.len() != len {
+            return Err(io::Error::other("allocator returned wrong-sized buffer"));
+        }
+        self.submit_read_exact_at(&self.inner, 0, buf)?;
+        Ok(bytes)
     }
 
     /// Reads `len` bytes at `offset` into a new buffer.
@@ -125,9 +135,15 @@ impl File {
         if len == 0 {
             return Ok(OwnedBytes::Vec(Vec::new()));
         }
-        let mut bytes = vec![0; len];
-        self.read_exact_at(offset, &mut bytes)?;
-        Ok(OwnedBytes::Vec(bytes))
+        let mut bytes = self.allocator.allocate(len);
+        let buf = bytes
+            .as_mut_slice()
+            .ok_or_else(|| io::Error::other("allocator returned immutable buffer"))?;
+        if buf.len() != len {
+            return Err(io::Error::other("allocator returned wrong-sized buffer"));
+        }
+        self.read_exact_at(offset, buf)?;
+        Ok(bytes)
     }
 
     /// Reads exactly enough bytes to fill `buf` at `offset`.
@@ -388,13 +404,13 @@ impl File {
     }
 }
 
-impl Read for File {
+impl<A> Read for File<A> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.read(buf)
     }
 }
 
-impl Write for File {
+impl<A> Write for File<A> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.inner.write(buf)
     }
@@ -404,13 +420,13 @@ impl Write for File {
     }
 }
 
-impl Seek for File {
+impl<A> Seek for File<A> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         self.inner.seek(pos)
     }
 }
 
-impl AsRef<std::fs::File> for File {
+impl<A> AsRef<std::fs::File> for File<A> {
     fn as_ref(&self) -> &std::fs::File {
         &self.inner
     }
@@ -418,13 +434,14 @@ impl AsRef<std::fs::File> for File {
 
 /// Options and flags for opening an `io_uring` file.
 #[derive(Debug, Clone)]
-pub struct OpenOptions {
+pub struct OpenOptions<A = DefaultAllocator> {
     inner: std::fs::OpenOptions,
     ring_depth: u32,
     chunk_size: usize,
+    allocator: A,
 }
 
-impl OpenOptions {
+impl OpenOptions<DefaultAllocator> {
     /// Creates a blank set of options.
     #[must_use]
     pub fn new() -> Self {
@@ -432,9 +449,12 @@ impl OpenOptions {
             inner: std::fs::OpenOptions::new(),
             ring_depth: DEFAULT_RING_DEPTH,
             chunk_size: DEFAULT_CHUNK_SIZE,
+            allocator: DefaultAllocator::default(),
         }
     }
+}
 
+impl<A: Allocator> OpenOptions<A> {
     /// Sets read access.
     pub fn read(&mut self, read: bool) -> &mut Self {
         self.inner.read(read);
@@ -483,8 +503,18 @@ impl OpenOptions {
         self
     }
 
+    /// Sets the allocator used by reads on files opened with these options.
+    pub fn allocator<B: Allocator>(&self, allocator: B) -> OpenOptions<B> {
+        OpenOptions {
+            inner: self.inner.clone(),
+            ring_depth: self.ring_depth,
+            chunk_size: self.chunk_size,
+            allocator,
+        }
+    }
+
     /// Opens a file with the configured options.
-    pub fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
+    pub fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File<A>> {
         if self.ring_depth == 0 {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -501,11 +531,12 @@ impl OpenOptions {
             inner: self.inner.open(path)?,
             ring_depth: self.ring_depth,
             chunk_size: self.chunk_size,
+            allocator: self.allocator.clone(),
         })
     }
 }
 
-impl Default for OpenOptions {
+impl Default for OpenOptions<DefaultAllocator> {
     fn default() -> Self {
         Self::new()
     }

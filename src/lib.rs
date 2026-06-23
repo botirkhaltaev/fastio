@@ -42,6 +42,6 @@ pub use std::io::{Error, Result};
 #[cfg(feature = "mmap")]
 pub use buffer::MmapRegion;
 #[cfg(feature = "pool")]
-pub use buffer::PoolConfig;
-pub use buffer::{BufferAllocator, OwnedBytes};
+pub use buffer::Pool;
+pub use buffer::{Allocator, DefaultAllocator, OwnedBytes, System};
 pub use write::{WriteSlice, WriteSlices};
