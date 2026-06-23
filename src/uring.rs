@@ -40,51 +40,20 @@ fn with_ring<T>(depth: u32, f: impl FnOnce(&mut IoUring) -> io::Result<T>) -> io
     })
 }
 
-#[derive(Debug, Clone, Copy)]
-struct RingOptions {
-    ring_depth: u32,
-    chunk_size: usize,
-}
-
-impl Default for RingOptions {
-    fn default() -> Self {
-        Self {
-            ring_depth: DEFAULT_RING_DEPTH,
-            chunk_size: DEFAULT_CHUNK_SIZE,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct RingBackend {
-    options: RingOptions,
-}
-
-impl RingBackend {
-    fn with_options(options: RingOptions) -> io::Result<Self> {
-        if options.ring_depth == 0 {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "ring_depth must be greater than zero",
-            ));
-        }
-        if options.chunk_size == 0 {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "chunk_size must be greater than zero",
-            ));
-        }
-        Ok(Self { options })
-    }
-
-    fn read_exact_at(&self, file: &std::fs::File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+impl File {
+    fn submit_read_exact_at(
+        &self,
+        file: &std::fs::File,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> io::Result<()> {
         if buf.is_empty() {
             return Ok(());
         }
-        let depth = self.options.ring_depth;
+        let depth = self.ring_depth;
         with_ring(depth, |ring| {
             let total = buf.len();
-            let chunk_size = self.options.chunk_size.min(total);
+            let chunk_size = self.chunk_size.min(total);
             let num_chunks = total.div_ceil(chunk_size);
 
             let mut done = vec![0usize; num_chunks];
@@ -158,14 +127,19 @@ impl RingBackend {
         })
     }
 
-    fn write_exact_at(&self, file: &std::fs::File, offset: u64, data: &[u8]) -> io::Result<()> {
+    fn submit_write_exact_at(
+        &self,
+        file: &std::fs::File,
+        offset: u64,
+        data: &[u8],
+    ) -> io::Result<()> {
         if data.is_empty() {
             return Ok(());
         }
-        let depth = self.options.ring_depth;
+        let depth = self.ring_depth;
         with_ring(depth, |ring| {
             let total = data.len();
-            let chunk_size = self.options.chunk_size.min(total);
+            let chunk_size = self.chunk_size.min(total);
             let num_chunks = total.div_ceil(chunk_size);
 
             let mut done = vec![0usize; num_chunks];
@@ -236,11 +210,15 @@ impl RingBackend {
         })
     }
 
-    fn write_slices_at(&self, file: &std::fs::File, writes: &[WriteSlice<'_>]) -> io::Result<()> {
+    fn submit_write_slices_at(
+        &self,
+        file: &std::fs::File,
+        writes: &[WriteSlice<'_>],
+    ) -> io::Result<()> {
         if writes.is_empty() {
             return Ok(());
         }
-        let depth = self.options.ring_depth;
+        let depth = self.ring_depth;
         with_ring(depth, |ring| {
             let n = writes.len();
             let mut done = vec![0usize; n];
@@ -310,7 +288,8 @@ impl RingBackend {
 #[derive(Debug)]
 pub struct File {
     inner: std::fs::File,
-    backend: RingBackend,
+    ring_depth: u32,
+    chunk_size: usize,
 }
 
 impl File {
@@ -343,7 +322,8 @@ impl File {
     pub fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             inner: self.inner.try_clone()?,
-            backend: self.backend,
+            ring_depth: self.ring_depth,
+            chunk_size: self.chunk_size,
         })
     }
 
@@ -380,7 +360,7 @@ impl File {
             return Ok(OwnedBytes::Vec(Vec::new()));
         }
         let mut bytes = vec![0; len];
-        self.backend.read_exact_at(&self.inner, 0, &mut bytes)?;
+        self.submit_read_exact_at(&self.inner, 0, &mut bytes)?;
         Ok(OwnedBytes::Vec(bytes))
     }
 
@@ -396,17 +376,17 @@ impl File {
 
     /// Reads exactly enough bytes to fill `buf` at `offset`.
     pub fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        self.backend.read_exact_at(&self.inner, offset, buf)
+        self.submit_read_exact_at(&self.inner, offset, buf)
     }
 
     /// Writes all bytes from `buf` at `offset`.
     pub fn write_all_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
-        self.backend.write_exact_at(&self.inner, offset, buf)
+        self.submit_write_exact_at(&self.inner, offset, buf)
     }
 
     /// Writes non-overlapping slices at their offsets.
     pub fn write_slices_at(&self, writes: WriteSlices<'_>) -> io::Result<()> {
-        self.backend.write_slices_at(&self.inner, writes.as_slice())
+        self.submit_write_slices_at(&self.inner, writes.as_slice())
     }
 }
 
@@ -450,11 +430,10 @@ impl OpenOptions {
     /// Creates a blank set of options.
     #[must_use]
     pub fn new() -> Self {
-        let defaults = RingOptions::default();
         Self {
             inner: std::fs::OpenOptions::new(),
-            ring_depth: defaults.ring_depth,
-            chunk_size: defaults.chunk_size,
+            ring_depth: DEFAULT_RING_DEPTH,
+            chunk_size: DEFAULT_CHUNK_SIZE,
         }
     }
 
@@ -508,13 +487,22 @@ impl OpenOptions {
 
     /// Opens a file with the configured options.
     pub fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
-        let backend = RingBackend::with_options(RingOptions {
-            ring_depth: self.ring_depth,
-            chunk_size: self.chunk_size,
-        })?;
+        if self.ring_depth == 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "ring_depth must be greater than zero",
+            ));
+        }
+        if self.chunk_size == 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "chunk_size must be greater than zero",
+            ));
+        }
         Ok(File {
             inner: self.inner.open(path)?,
-            backend,
+            ring_depth: self.ring_depth,
+            chunk_size: self.chunk_size,
         })
     }
 }
