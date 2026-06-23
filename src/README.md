@@ -11,4 +11,4 @@
 
 The crate root exports backend modules and shared value types, but no default file backend or backend free functions.
 
-Read-capable file backends are generic over an allocator. With `feature = "pool"`, `DefaultAllocator` is `Pool`; without it, `DefaultAllocator` is `System`. `mmap` is not allocator-backed.
+Read-capable file backends are generic over an allocator. With `feature = "pool"`, `DefaultAllocator` is `Pool`; without it, `DefaultAllocator` is `System`. Zero-length reads return an empty `OwnedBytes::Vec` without using the allocator. `mmap` is not allocator-backed.

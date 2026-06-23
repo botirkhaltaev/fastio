@@ -53,7 +53,7 @@ impl File<DefaultAllocator> {
 
 impl<A: Allocator> File<A> {
     /// Creates a new `File` instance sharing the same underlying handle.
-    pub async fn try_clone(&self) -> io::Result<Self> {
+    pub fn try_clone(&self) -> io::Result<Self> {
         let file = self.inner.try_clone()?;
         Ok(Self {
             inner: file,
@@ -62,7 +62,7 @@ impl<A: Allocator> File<A> {
     }
 
     /// Queries metadata about the underlying file.
-    pub async fn metadata(&self) -> io::Result<Metadata> {
+    pub fn metadata(&self) -> io::Result<Metadata> {
         self.inner.metadata()
     }
 
@@ -146,30 +146,71 @@ impl<A: Allocator> File<A> {
 
     /// Reads exactly enough bytes to fill `buf` at `offset`.
     pub async fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        read_at_positioned(&self.inner, offset, buf)
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let file = self.inner.try_clone()?;
+        let len = buf.len();
+        let bytes = ::tokio::task::spawn_blocking(move || {
+            let mut bytes = vec![0u8; len];
+            read_at_positioned(&file, offset, &mut bytes)?;
+            Ok::<_, io::Error>(bytes)
+        })
+        .await
+        .map_err(io::Error::other)??;
+        buf.copy_from_slice(&bytes);
+        Ok(())
     }
 
     /// Writes all bytes from `buf` at `offset`.
     pub async fn write_all_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
-        write_at_positioned(&self.inner, offset, buf)
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let file = self.inner.try_clone()?;
+        let bytes = buf.to_vec();
+        ::tokio::task::spawn_blocking(move || write_at_positioned(&file, offset, &bytes))
+            .await
+            .map_err(io::Error::other)?
     }
 
     /// Writes non-overlapping slices at their offsets.
     pub async fn write_slices_at(&self, writes: WriteSlices<'_, '_>) -> io::Result<()> {
-        let file = &self.inner;
-        std::thread::scope(|scope| {
-            let handles = writes
-                .as_slice()
-                .iter()
-                .map(|w| scope.spawn(|| write_at_positioned(file, w.offset, w.data)))
-                .collect::<Vec<_>>();
-            for handle in handles {
-                handle
-                    .join()
-                    .map_err(|_| io::Error::other("positioned write worker panicked"))??;
+        let file = self.inner.try_clone()?;
+        let writes = writes
+            .as_slice()
+            .iter()
+            .map(|w| (w.offset, w.data.to_vec()))
+            .collect::<Vec<_>>();
+        ::tokio::task::spawn_blocking(move || {
+            if writes.is_empty() {
+                return Ok(());
+            }
+            let workers = std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1)
+                .min(writes.len())
+                .max(1);
+            for batch in writes.chunks(workers) {
+                std::thread::scope(|scope| {
+                    let handles = batch
+                        .iter()
+                        .map(|(offset, data)| {
+                            scope.spawn(|| write_at_positioned(&file, *offset, data))
+                        })
+                        .collect::<Vec<_>>();
+                    for handle in handles {
+                        handle
+                            .join()
+                            .map_err(|_| io::Error::other("positioned write worker panicked"))??;
+                    }
+                    Ok::<_, io::Error>(())
+                })?;
             }
             Ok(())
         })
+        .await
+        .map_err(io::Error::other)?
     }
 }
 

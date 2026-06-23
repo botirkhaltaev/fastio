@@ -15,7 +15,8 @@ Fast file I/O backends for Rust libraries and applications.
 Default features enable all supported backends for the current platform.
 With `pool` enabled, read methods allocate from the process-wide pool by
 default and return `OwnedBytes::Pooled`. Use `System` on an `OpenOptions` value
-to force normal heap-backed `OwnedBytes::Vec` reads.
+to force normal heap-backed `OwnedBytes::Vec` reads. Zero-length reads return
+an empty `OwnedBytes::Vec` without touching the allocator.
 
 ## Example
 

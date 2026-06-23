@@ -2,7 +2,7 @@
 
 The `tokio` module provides a `tokio::fs`-like `File` and `OpenOptions` with positioned I/O methods.
 
-File operations are async. Positioned writes use blocking positioned I/O inside Tokio blocking sections so callers can write independent file ranges in parallel.
+File operations are async where they can avoid blocking runtime worker threads. Positioned reads and writes move owned buffers into Tokio blocking tasks; batch writes use bounded worker waves inside one blocking task.
 
 `File` and `OpenOptions` are allocator-generic. Default reads use pooled buffers when `pool` is enabled; call `OpenOptions::allocator(System)` to force heap-backed reads.
 

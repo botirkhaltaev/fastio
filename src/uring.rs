@@ -17,6 +17,13 @@ const DEFAULT_RING_DEPTH: u32 = 256;
 const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const MAX_IO_LEN: usize = u32::MAX as usize;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmissionState {
+    Idle,
+    InFlight,
+    Done,
+}
+
 thread_local! {
     static CACHED_RING: RefCell<Option<IoUring>> = const { RefCell::new(None) };
 }
@@ -177,20 +184,25 @@ impl<A: Allocator> File<A> {
             let num_chunks = total.div_ceil(chunk_size);
 
             let mut done = vec![0usize; num_chunks];
+            let mut state = vec![SubmissionState::Idle; num_chunks];
             let mut in_flight: u32 = 0;
-            let mut next_submit = 0usize;
             let mut pending_error: Option<io::Error> = None;
 
             loop {
-                while pending_error.is_none() && in_flight < depth && next_submit < num_chunks {
-                    let idx = next_submit;
+                for idx in 0..num_chunks {
+                    if pending_error.is_some() || in_flight >= depth {
+                        break;
+                    }
+                    if state[idx] != SubmissionState::Idle {
+                        continue;
+                    }
                     let chunk_start = idx * chunk_size;
                     let chunk_end = total.min(chunk_start + chunk_size);
                     let chunk_len = chunk_end - chunk_start;
                     let so_far = done[idx];
                     let remaining = chunk_len - so_far;
                     if remaining == 0 {
-                        next_submit += 1;
+                        state[idx] = SubmissionState::Done;
                         continue;
                     }
                     let len = remaining.min(MAX_IO_LEN) as u32;
@@ -214,8 +226,8 @@ impl<A: Allocator> File<A> {
                             break;
                         }
                     }
+                    state[idx] = SubmissionState::InFlight;
                     in_flight += 1;
-                    next_submit += 1;
                 }
 
                 if in_flight == 0 {
@@ -225,12 +237,15 @@ impl<A: Allocator> File<A> {
                     break;
                 }
 
-                ring.submit_and_wait(1)?;
+                if let Err(err) = ring.submit_and_wait(1) {
+                    pending_error.get_or_insert(err);
+                }
 
                 let cq: Vec<_> = ring.completion().collect();
                 for cqe in cq {
                     in_flight -= 1;
                     let idx = cqe.user_data() as usize;
+                    state[idx] = SubmissionState::Idle;
                     let result = cqe.result();
                     if result < 0 {
                         pending_error.get_or_insert_with(|| Error::from_raw_os_error(-result));
@@ -247,8 +262,8 @@ impl<A: Allocator> File<A> {
                     let chunk_start = idx * chunk_size;
                     let chunk_end = total.min(chunk_start + chunk_size);
                     let chunk_len = chunk_end - chunk_start;
-                    if done[idx] < chunk_len && next_submit > idx {
-                        next_submit = idx;
+                    if done[idx] >= chunk_len {
+                        state[idx] = SubmissionState::Done;
                     }
                 }
             }
@@ -273,20 +288,25 @@ impl<A: Allocator> File<A> {
             let num_chunks = total.div_ceil(chunk_size);
 
             let mut done = vec![0usize; num_chunks];
+            let mut state = vec![SubmissionState::Idle; num_chunks];
             let mut in_flight: u32 = 0;
-            let mut next_submit = 0usize;
             let mut pending_error: Option<io::Error> = None;
 
             loop {
-                while pending_error.is_none() && in_flight < depth && next_submit < num_chunks {
-                    let idx = next_submit;
+                for idx in 0..num_chunks {
+                    if pending_error.is_some() || in_flight >= depth {
+                        break;
+                    }
+                    if state[idx] != SubmissionState::Idle {
+                        continue;
+                    }
                     let chunk_start = idx * chunk_size;
                     let chunk_end = total.min(chunk_start + chunk_size);
                     let chunk_len = chunk_end - chunk_start;
                     let so_far = done[idx];
                     let remaining = chunk_len - so_far;
                     if remaining == 0 {
-                        next_submit += 1;
+                        state[idx] = SubmissionState::Done;
                         continue;
                     }
                     let len = remaining.min(MAX_IO_LEN) as u32;
@@ -307,8 +327,8 @@ impl<A: Allocator> File<A> {
                             break;
                         }
                     }
+                    state[idx] = SubmissionState::InFlight;
                     in_flight += 1;
-                    next_submit += 1;
                 }
 
                 if in_flight == 0 {
@@ -318,12 +338,15 @@ impl<A: Allocator> File<A> {
                     break;
                 }
 
-                ring.submit_and_wait(1)?;
+                if let Err(err) = ring.submit_and_wait(1) {
+                    pending_error.get_or_insert(err);
+                }
 
                 let cq: Vec<_> = ring.completion().collect();
                 for cqe in cq {
                     in_flight -= 1;
                     let idx = cqe.user_data() as usize;
+                    state[idx] = SubmissionState::Idle;
                     let result = cqe.result();
                     if result < 0 {
                         pending_error.get_or_insert_with(|| Error::from_raw_os_error(-result));
@@ -340,8 +363,8 @@ impl<A: Allocator> File<A> {
                     let chunk_start = idx * chunk_size;
                     let chunk_end = total.min(chunk_start + chunk_size);
                     let chunk_len = chunk_end - chunk_start;
-                    if done[idx] < chunk_len && next_submit > idx {
-                        next_submit = idx;
+                    if done[idx] >= chunk_len {
+                        state[idx] = SubmissionState::Done;
                     }
                 }
             }
@@ -362,18 +385,23 @@ impl<A: Allocator> File<A> {
         with_ring(depth, |ring| {
             let n = writes.len();
             let mut done = vec![0usize; n];
+            let mut state = vec![SubmissionState::Idle; n];
             let mut in_flight: u32 = 0;
-            let mut next_submit = 0usize;
             let mut pending_error: Option<io::Error> = None;
 
             loop {
-                while pending_error.is_none() && in_flight < depth && next_submit < n {
-                    let idx = next_submit;
+                for idx in 0..n {
+                    if pending_error.is_some() || in_flight >= depth {
+                        break;
+                    }
+                    if state[idx] != SubmissionState::Idle {
+                        continue;
+                    }
                     let write = &writes[idx];
                     let so_far = done[idx];
                     let remaining = write.data.len() - so_far;
                     if remaining == 0 {
-                        next_submit += 1;
+                        state[idx] = SubmissionState::Done;
                         continue;
                     }
                     let len = remaining.min(MAX_IO_LEN) as u32;
@@ -394,8 +422,8 @@ impl<A: Allocator> File<A> {
                             break;
                         }
                     }
+                    state[idx] = SubmissionState::InFlight;
                     in_flight += 1;
-                    next_submit += 1;
                 }
 
                 if in_flight == 0 {
@@ -405,12 +433,15 @@ impl<A: Allocator> File<A> {
                     break;
                 }
 
-                ring.submit_and_wait(1)?;
+                if let Err(err) = ring.submit_and_wait(1) {
+                    pending_error.get_or_insert(err);
+                }
 
                 let cq: Vec<_> = ring.completion().collect();
                 for cqe in cq {
                     in_flight -= 1;
                     let idx = cqe.user_data() as usize;
+                    state[idx] = SubmissionState::Idle;
                     let result = cqe.result();
                     if result < 0 {
                         pending_error.get_or_insert_with(|| Error::from_raw_os_error(-result));
@@ -424,8 +455,8 @@ impl<A: Allocator> File<A> {
                         continue;
                     }
                     done[idx] += n_written;
-                    if done[idx] < writes[idx].data.len() && next_submit > idx {
-                        next_submit = idx;
+                    if done[idx] >= writes[idx].data.len() {
+                        state[idx] = SubmissionState::Done;
                     }
                 }
             }
