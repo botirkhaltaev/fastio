@@ -265,9 +265,8 @@ impl IoUring {
 
     /// Writes every slice in `writes` to `file` using a saturated io_uring ring.
     ///
-    /// Submits up to `ring_depth` ops simultaneously.  Partial writes are
-    /// resubmitted immediately.  `writes` must be non-overlapping (guaranteed
-    /// by [`WriteSlices`]).
+    /// Submits up to `ring_depth` ops simultaneously. Partial writes are
+    /// resubmitted immediately. Callers must pass non-overlapping writes.
     pub(crate) fn ring_batch_writes(&self, file: &File, writes: &[WriteSlice<'_>]) -> IoResult<()> {
         if writes.is_empty() {
             return Ok(());

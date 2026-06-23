@@ -5,10 +5,10 @@
 
 use std::fs::{Metadata, Permissions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::io_uring::{IoUring, IoUringOptions};
-use crate::{OwnedBytes, WriteSlice, WriteSlices};
+use crate::{OwnedBytes, WriteSlices};
 
 /// A Linux `io_uring` file handle.
 #[derive(Debug)]
@@ -109,8 +109,7 @@ impl File {
     }
 
     /// Writes non-overlapping slices at their offsets.
-    pub fn write_slices_at(&self, slices: &[WriteSlice<'_>]) -> io::Result<()> {
-        let writes = WriteSlices::new(slices)?;
+    pub fn write_slices_at(&self, writes: WriteSlices<'_>) -> io::Result<()> {
         self.backend
             .ring_batch_writes(&self.inner, writes.as_slice())
     }
@@ -229,56 +228,4 @@ impl Default for OpenOptions {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Reads the entire contents of a file into bytes.
-pub fn read<P: AsRef<Path>>(path: P) -> io::Result<OwnedBytes> {
-    File::open(path)?.read_all()
-}
-
-/// Writes a slice as the entire contents of a file.
-pub fn write<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> io::Result<()> {
-    let mut file = File::create(path)?;
-    file.write_all(contents.as_ref())
-}
-
-/// Reads the entire contents of a file into a string.
-pub fn read_to_string<P: AsRef<Path>>(path: P) -> io::Result<String> {
-    String::from_utf8(read(path)?.into_vec())
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
-}
-
-/// Copies one file to another.
-pub fn copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<u64> {
-    std::fs::copy(from, to)
-}
-
-/// Queries metadata for a path.
-pub fn metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
-    std::fs::metadata(path)
-}
-
-/// Queries symlink metadata for a path.
-pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
-    std::fs::symlink_metadata(path)
-}
-
-/// Returns the canonical absolute path.
-pub fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
-    std::fs::canonicalize(path)
-}
-
-/// Removes a file from the filesystem.
-pub fn remove_file<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    std::fs::remove_file(path)
-}
-
-/// Renames a file or directory.
-pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> {
-    std::fs::rename(from, to)
-}
-
-/// Returns whether the path points at an existing entity.
-pub fn exists<P: AsRef<Path>>(path: P) -> io::Result<bool> {
-    std::fs::exists(path)
 }

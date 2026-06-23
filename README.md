@@ -2,7 +2,7 @@
 
 Fast file I/O backends for Rust libraries and applications.
 
-`fastio` exposes explicit backend modules with APIs shaped after `std::fs` and `tokio::fs`. There is no default backend: choose `sync`, `tokio`, `mmap`, or Linux `uring` directly.
+`fastio` exposes explicit backend-owned file handles. There is no default backend and no module-level convenience API: choose `sync::File`, `tokio::File`, `mmap::File`, or Linux `uring::File` directly.
 
 ## Features
 

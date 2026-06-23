@@ -38,19 +38,13 @@ impl<'a> WriteSlices<'a> {
             .iter()
             .map(|w| w.end_offset().map(|end| (w.offset, end)))
             .collect::<IoResult<_>>()?;
-        sorted.sort_unstable_by_key(|&(s, _)| s);
+        sorted.sort_unstable_by_key(|&(start, _)| start);
         for pair in sorted.windows(2) {
             if pair[0].1 > pair[1].0 {
                 return Err(Error::new(ErrorKind::InvalidInput, "write slices overlap"));
             }
         }
         Ok(Self(slices))
-    }
-
-    #[inline]
-    #[must_use]
-    pub const fn new_unchecked(slices: &'a [WriteSlice<'a>]) -> Self {
-        Self(slices)
     }
 
     #[inline]

@@ -1,6 +1,6 @@
 //! # fastio
 //!
-//! Explicit file I/O backends with APIs shaped after `std::fs` and `tokio::fs`.
+//! Explicit file I/O backends with backend-owned file handles.
 //!
 //! `fastio` intentionally has no default backend. Choose a backend module such
 //! as [`sync`], `tokio`, `mmap`, or Linux `uring`, then use that module's file
@@ -25,7 +25,6 @@
 //! ```
 
 pub mod buffer;
-pub mod range;
 pub mod write;
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
@@ -47,7 +46,6 @@ pub use buffer::MmapRegion;
 #[cfg(feature = "pool")]
 pub use buffer::PoolConfig;
 pub use buffer::{BufferAllocator, OwnedBytes};
-pub use range::{ByteRange, FileRange, RangeRead, RequestIndex};
 pub use write::{WriteSlice, WriteSlices};
 
 #[cfg(all(test, feature = "tokio"))]

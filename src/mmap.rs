@@ -7,7 +7,7 @@ use crate::{IoResult, buffer::MmapRegion};
 use memmap2::MmapOptions as MemmapOptions;
 use std::fs::{File as StdFile, Metadata};
 use std::io::{Error, ErrorKind};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 /// A file handle for memory-mapped reads.
@@ -19,7 +19,7 @@ pub struct File {
 impl File {
     /// Opens a file in read-only mode.
     pub fn open<P: AsRef<Path>>(path: P) -> IoResult<Self> {
-        OpenOptions::new().read(true).open(path)
+        OpenOptions::new().open(path)
     }
 
     /// Returns a new options object for opening a memory-mapped file.
@@ -111,28 +111,20 @@ impl AsRef<StdFile> for File {
 /// Options and flags for opening a memory-mapped file.
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
-    inner: std::fs::OpenOptions,
+    _private: (),
 }
 
 impl OpenOptions {
     /// Creates a blank set of options.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            inner: std::fs::OpenOptions::new(),
-        }
+        Self { _private: () }
     }
 
-    /// Sets read access.
-    pub fn read(&mut self, read: bool) -> &mut Self {
-        self.inner.read(read);
-        self
-    }
-
-    /// Opens a file with the configured options.
+    /// Opens a file for read-only memory mapping.
     pub fn open<P: AsRef<Path>>(&self, path: P) -> IoResult<File> {
         Ok(File {
-            inner: self.inner.open(path)?,
+            inner: StdFile::open(path)?,
         })
     }
 }
@@ -141,31 +133,6 @@ impl Default for OpenOptions {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Memory-maps an entire file.
-pub fn map<P: AsRef<Path>>(path: P) -> IoResult<MmapRegion> {
-    File::open(path)?.map()
-}
-
-/// Memory-maps `len` bytes starting at `offset`.
-pub fn map_range<P: AsRef<Path>>(path: P, offset: u64, len: usize) -> IoResult<MmapRegion> {
-    File::open(path)?.map_range(offset, len)
-}
-
-/// Queries metadata for a path.
-pub fn metadata<P: AsRef<Path>>(path: P) -> IoResult<Metadata> {
-    std::fs::metadata(path)
-}
-
-/// Queries symlink metadata for a path.
-pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> IoResult<Metadata> {
-    std::fs::symlink_metadata(path)
-}
-
-/// Returns the canonical absolute path.
-pub fn canonicalize<P: AsRef<Path>>(path: P) -> IoResult<PathBuf> {
-    std::fs::canonicalize(path)
 }
 
 #[cfg(test)]
@@ -185,7 +152,7 @@ mod tests {
         let data: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
         let path = write_tmp(&dir, "file.bin", &data);
 
-        let region = map(&path).unwrap();
+        let region = File::open(&path).unwrap().map().unwrap();
         assert_eq!(region.as_slice(), &data[..]);
         assert_eq!(region.len(), 4096);
         assert!(!region.is_empty());
@@ -196,7 +163,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_tmp(&dir, "empty.bin", b"");
 
-        let err = map(&path).unwrap_err();
+        let err = File::open(&path).unwrap().map().unwrap_err();
         assert!(
             err.kind() == std::io::ErrorKind::InvalidData
                 || err.kind() == std::io::ErrorKind::Other,
@@ -240,7 +207,7 @@ mod tests {
         let data = vec![0xABu8; 1024 * 1024]; // 1 MiB
         let path = write_tmp(&dir, "large.bin", &data);
 
-        let region = map(&path).unwrap();
+        let region = File::open(&path).unwrap().map().unwrap();
         assert_eq!(region.len(), data.len());
         assert!(region.as_slice().iter().all(|&b| b == 0xAB));
     }
@@ -266,7 +233,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_tmp(&dir, "clone.bin", b"hello clone");
 
-        let r1 = map(&path).unwrap();
+        let r1 = File::open(&path).unwrap().map().unwrap();
         let r2 = r1.clone();
         assert_eq!(r1.as_slice(), r2.as_slice());
         assert_eq!(r2.as_slice(), b"hello clone");

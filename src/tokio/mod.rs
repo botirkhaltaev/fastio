@@ -5,7 +5,7 @@
 
 use std::fs::{Metadata, Permissions};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::{IoResult, WriteSlices, buffer::OwnedBytes};
 
@@ -137,8 +137,7 @@ impl File {
     }
 
     /// Writes non-overlapping slices at their offsets.
-    pub async fn write_slices_at(&self, slices: &[crate::WriteSlice<'_>]) -> io::Result<()> {
-        let writes = WriteSlices::new(slices)?;
+    pub async fn write_slices_at(&self, writes: WriteSlices<'_>) -> io::Result<()> {
         let file = self.inner.try_clone()?;
         ::tokio::task::block_in_place(|| {
             std::thread::scope(|scope| {
@@ -231,56 +230,6 @@ impl Default for OpenOptions {
     }
 }
 
-/// Reads the entire contents of a file into bytes.
-pub async fn read<P: AsRef<Path>>(path: P) -> io::Result<OwnedBytes> {
-    File::open(path).await?.read_all().await
-}
-
-/// Writes a slice as the entire contents of a file.
-pub async fn write<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> io::Result<()> {
-    ::tokio::fs::write(path, contents).await
-}
-
-/// Reads the entire contents of a file into a string.
-pub async fn read_to_string<P: AsRef<Path>>(path: P) -> io::Result<String> {
-    ::tokio::fs::read_to_string(path).await
-}
-
-/// Copies one file to another.
-pub async fn copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<u64> {
-    ::tokio::fs::copy(from, to).await
-}
-
-/// Queries metadata for a path.
-pub async fn metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
-    ::tokio::fs::metadata(path).await
-}
-
-/// Queries symlink metadata for a path.
-pub async fn symlink_metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
-    ::tokio::fs::symlink_metadata(path).await
-}
-
-/// Returns the canonical absolute path.
-pub async fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
-    ::tokio::fs::canonicalize(path).await
-}
-
-/// Removes a file from the filesystem.
-pub async fn remove_file<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    ::tokio::fs::remove_file(path).await
-}
-
-/// Renames a file or directory.
-pub async fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> {
-    ::tokio::fs::rename(from, to).await
-}
-
-/// Returns whether the path points at an existing entity.
-pub async fn exists<P: AsRef<Path>>(path: P) -> io::Result<bool> {
-    ::tokio::fs::try_exists(path).await
-}
-
 /// Positioned read that doesn't require a seek (uses OS-level pread).
 #[cfg(unix)]
 fn read_at_positioned(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> IoResult<()> {
@@ -336,12 +285,17 @@ mod tests {
         path
     }
 
+    fn read_all(path: &std::path::Path) -> crate::OwnedBytes {
+        let file = run_async(File::open(path)).unwrap();
+        run_async(file.read_all()).unwrap()
+    }
+
     #[test]
     fn read_roundtrip() {
         let dir = TempDir::new().unwrap();
         let data: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
         let path = write_tmp(&dir, "file.bin", &data);
-        let result = run_async(read(&path)).unwrap();
+        let result = read_all(&path);
         assert_eq!(result.as_ref(), &data[..]);
     }
 
@@ -349,7 +303,7 @@ mod tests {
     fn read_empty() {
         let dir = TempDir::new().unwrap();
         let path = write_tmp(&dir, "empty.bin", b"");
-        let result = run_async(read(&path)).unwrap();
+        let result = read_all(&path);
         assert!(result.is_empty());
     }
 
@@ -375,8 +329,9 @@ mod tests {
     fn write_roundtrip() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("out.bin");
-        run_async(write(&path, b"test data")).unwrap();
-        let result = run_async(read(&path)).unwrap();
+        let file = run_async(File::create(&path)).unwrap();
+        run_async(file.write_all_at(0, b"test data")).unwrap();
+        let result = read_all(&path);
         assert_eq!(result.as_ref(), b"test data");
     }
 
@@ -384,8 +339,9 @@ mod tests {
     fn write_truncates_existing() {
         let dir = TempDir::new().unwrap();
         let path = write_tmp(&dir, "existing.bin", b"old data here");
-        run_async(write(&path, b"new")).unwrap();
-        let result = run_async(read(&path)).unwrap();
+        let file = run_async(File::create(&path)).unwrap();
+        run_async(file.write_all_at(0, b"new")).unwrap();
+        let result = read_all(&path);
         assert_eq!(result.as_ref(), b"new");
     }
 
@@ -395,7 +351,7 @@ mod tests {
         let path = write_tmp(&dir, "data.bin", b"hello world");
         let file = run_async(OpenOptions::new().write(true).open(&path)).unwrap();
         run_async(file.write_all_at(6, b"rust!")).unwrap();
-        let result = run_async(read(&path)).unwrap();
+        let result = read_all(&path);
         assert_eq!(result.as_ref(), b"hello rust!");
     }
 
@@ -405,8 +361,8 @@ mod tests {
         let path = write_tmp(&dir, "data.bin", b"----------");
         let slices = vec![WriteSlice::new(0, b"AB"), WriteSlice::new(8, b"CD")];
         let file = run_async(OpenOptions::new().write(true).open(&path)).unwrap();
-        run_async(file.write_slices_at(&slices)).unwrap();
-        let result = run_async(read(&path)).unwrap();
+        run_async(file.write_slices_at(crate::WriteSlices::new(&slices).unwrap())).unwrap();
+        let result = read_all(&path);
         assert_eq!(result.as_ref(), b"AB------CD");
     }
 
@@ -415,8 +371,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_tmp(&dir, "data.bin", b"unchanged");
         let file = run_async(OpenOptions::new().write(true).open(&path)).unwrap();
-        run_async(file.write_slices_at(&[])).unwrap();
-        let result = run_async(read(&path)).unwrap();
+        run_async(file.write_slices_at(crate::WriteSlices::new(&[]).unwrap())).unwrap();
+        let result = read_all(&path);
         assert_eq!(result.as_ref(), b"unchanged");
     }
 
@@ -426,7 +382,7 @@ mod tests {
         let path = dir.path().join("positioned.bin");
         let file = run_async(File::create(&path)).unwrap();
         run_async(file.set_len(16)).unwrap();
-        let result = run_async(read(&path)).unwrap();
+        let result = read_all(&path);
         assert_eq!(result.as_ref().len(), 16);
     }
 
