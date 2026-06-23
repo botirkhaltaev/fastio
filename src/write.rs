@@ -91,4 +91,27 @@ mod tests {
         let b = WriteSlice::new(3, b"");
         assert!(WriteSlices::new(&[a, b]).is_ok());
     }
+
+    #[test]
+    fn write_slices_allows_adjacent_ranges() {
+        let a = WriteSlice::new(0, b"abc");
+        let b = WriteSlice::new(3, b"def");
+        let slices = [a, b];
+
+        let writes = WriteSlices::new(&slices).unwrap();
+
+        assert_eq!(writes.len(), 2);
+    }
+
+    #[test]
+    fn write_slices_allows_unsorted_non_overlapping_ranges() {
+        let first = WriteSlice::new(10, b"tail");
+        let second = WriteSlice::new(0, b"head");
+        let slices = [first, second];
+
+        let writes = WriteSlices::new(&slices).unwrap();
+
+        assert_eq!(writes.as_slice()[0].offset, 10);
+        assert_eq!(writes.as_slice()[1].offset, 0);
+    }
 }

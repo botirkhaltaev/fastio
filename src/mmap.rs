@@ -205,6 +205,20 @@ mod tests {
     }
 
     #[test]
+    fn map_range_rejects_offset_overflow() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("overflow.bin");
+        std::fs::write(&path, b"hello").unwrap();
+
+        let err = File::open(&path)
+            .unwrap()
+            .map_range(u64::MAX, 2)
+            .unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
     fn map_file_large() {
         let dir = TempDir::new().unwrap();
         let data = vec![0xABu8; 1024 * 1024]; // 1 MiB

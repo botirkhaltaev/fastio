@@ -603,3 +603,141 @@ impl Default for OpenOptions<DefaultAllocator> {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{OwnedBytes, System, WriteSlice, WriteSlices};
+    use tempfile::TempDir;
+
+    fn allow_unavailable<T>(result: io::Result<T>) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(err) if err.to_string().contains("failed to initialize io_uring") => None,
+            Err(err) => panic!("unexpected io_uring error: {err}"),
+        }
+    }
+
+    #[test]
+    fn read_all_roundtrips_file_contents() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("read-all.bin");
+        std::fs::write(&path, b"hello uring").unwrap();
+        let file = File::open(&path).unwrap();
+
+        let Some(bytes) = allow_unavailable(file.read_all()) else {
+            return;
+        };
+
+        assert_eq!(bytes.as_ref(), b"hello uring");
+    }
+
+    #[test]
+    fn read_at_returns_positioned_bytes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("read-at.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let file = File::open(&path).unwrap();
+
+        let Some(bytes) = allow_unavailable(file.read_at(2, 3)) else {
+            return;
+        };
+
+        assert_eq!(bytes.as_ref(), b"cde");
+    }
+
+    #[test]
+    fn system_allocator_returns_vec_read_buffer() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("system.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .allocator(System)
+            .open(&path)
+            .unwrap();
+
+        let Some(bytes) = allow_unavailable(file.read_at(1, 3)) else {
+            return;
+        };
+
+        assert!(matches!(&bytes, OwnedBytes::Vec(_)));
+        assert_eq!(bytes.as_ref(), b"bcd");
+    }
+
+    #[test]
+    fn write_all_at_preserves_surrounding_bytes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("write-at.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+
+        let Some(()) = allow_unavailable(file.write_all_at(6, b"uring")) else {
+            return;
+        };
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello uring");
+    }
+
+    #[test]
+    fn write_slices_at_writes_non_overlapping_ranges() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("write-slices.bin");
+        std::fs::write(&path, b"----------").unwrap();
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        let slices = [WriteSlice::new(0, b"AB"), WriteSlice::new(8, b"YZ")];
+
+        let Some(()) = allow_unavailable(file.write_slices_at(WriteSlices::new(&slices).unwrap()))
+        else {
+            return;
+        };
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"AB------YZ");
+    }
+
+    #[test]
+    fn ring_depth_one_and_tiny_chunks_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("chunked.bin");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .ring_depth(1)
+            .chunk_size(3)
+            .open(&path)
+            .unwrap();
+        let data = b"chunked io_uring data";
+
+        let Some(()) = allow_unavailable(file.write_all_at(0, data)) else {
+            return;
+        };
+        let Some(bytes) = allow_unavailable(file.read_at(0, data.len())) else {
+            return;
+        };
+
+        assert_eq!(bytes.as_ref(), data);
+    }
+
+    #[test]
+    fn invalid_ring_options_return_invalid_input() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("invalid.bin");
+        std::fs::write(&path, b"x").unwrap();
+
+        let depth_err = OpenOptions::new()
+            .read(true)
+            .ring_depth(0)
+            .open(&path)
+            .unwrap_err();
+        let chunk_err = OpenOptions::new()
+            .read(true)
+            .chunk_size(0)
+            .open(&path)
+            .unwrap_err();
+
+        assert_eq!(depth_err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(chunk_err.kind(), io::ErrorKind::InvalidInput);
+    }
+}

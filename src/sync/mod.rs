@@ -22,8 +22,18 @@ compile_error!("fastio sync supports Linux, macOS, and Windows only");
 #[cfg(test)]
 mod file_api_tests {
     use super::*;
-    use crate::{OwnedBytes, System};
+    use crate::{Allocator, OwnedBytes, System, WriteSlice, WriteSlices};
+    use std::io::{Read, Seek, SeekFrom};
     use tempfile::TempDir;
+
+    #[derive(Debug, Clone)]
+    struct ShortAllocator;
+
+    impl Allocator for ShortAllocator {
+        fn allocate(&self, len: usize) -> OwnedBytes {
+            OwnedBytes::Vec(vec![0; len.saturating_sub(1)])
+        }
+    }
 
     #[test]
     fn file_read_all_reads_entire_file() {
@@ -88,5 +98,60 @@ mod file_api_tests {
         file.write_all_at(2, b"XX").unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), b"abXXef");
+    }
+
+    #[test]
+    fn read_all_does_not_move_cursor() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+
+        let mut file = OpenOptions::new().read(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(2)).unwrap();
+        let bytes = file.read_all().unwrap();
+        let mut next = [0u8; 1];
+        file.read_exact(&mut next).unwrap();
+
+        assert_eq!(bytes.as_ref(), b"abcdef");
+        assert_eq!(next, [b'c']);
+    }
+
+    #[test]
+    fn create_new_fails_when_file_exists() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("existing.bin");
+        std::fs::write(&path, b"already here").unwrap();
+
+        let err = File::create_new(&path).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn write_slices_at_rejects_overlapping_slices() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"----------").unwrap();
+        let slices = [WriteSlice::new(0, b"abcdef"), WriteSlice::new(3, b"XYZ")];
+
+        let err = WriteSlices::new(&slices).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn read_reports_allocator_contract_violation() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("model.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .allocator(ShortAllocator)
+            .open(&path)
+            .unwrap();
+
+        let err = file.read_at(0, 3).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
     }
 }

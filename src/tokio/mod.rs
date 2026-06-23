@@ -359,8 +359,17 @@ fn write_at_positioned(file: &std::fs::File, offset: u64, data: &[u8]) -> IoResu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{OwnedBytes, System, WriteSlice};
+    use crate::{Allocator, OwnedBytes, System, WriteSlice};
     use tempfile::TempDir;
+
+    #[derive(Debug, Clone)]
+    struct ShortAllocator;
+
+    impl Allocator for ShortAllocator {
+        fn allocate(&self, len: usize) -> OwnedBytes {
+            OwnedBytes::Vec(vec![0; len.saturating_sub(1)])
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn read_roundtrip() {
@@ -426,6 +435,23 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn read_reports_allocator_contract_violation() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("data.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .allocator(ShortAllocator)
+            .open(&path)
+            .await
+            .unwrap();
+
+        let err = file.read_at(0, 5).await.unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn file_read_at_zero_len() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("data.bin");
@@ -470,6 +496,26 @@ mod tests {
         assert_eq!(result.as_ref(), b"hello rust!");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn positioned_io_works_on_current_thread_runtime() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("current-thread.bin");
+        std::fs::write(&path, b"hello -----").unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .await
+            .unwrap();
+
+        let mut buf = [0u8; 5];
+        file.read_exact_at(0, &mut buf).await.unwrap();
+        file.write_all_at(6, b"world").await.unwrap();
+
+        assert_eq!(&buf, b"hello");
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn write_slices_batches_into_existing_file() {
         let dir = TempDir::new().unwrap();
@@ -483,6 +529,44 @@ mod tests {
         let file = File::open(&path).await.unwrap();
         let result = file.read_all().await.unwrap();
         assert_eq!(result.as_ref(), b"AB------CD");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn write_slices_at_works_on_current_thread_runtime() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("current-thread-batch.bin");
+        std::fs::write(&path, b"--------").unwrap();
+        let slices = [WriteSlice::new(0, b"AB"), WriteSlice::new(6, b"YZ")];
+        let file = OpenOptions::new().write(true).open(&path).await.unwrap();
+
+        file.write_slices_at(crate::WriteSlices::new(&slices).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"AB----YZ");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_slices_handles_batches_larger_than_worker_count() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("large-batch.bin");
+        std::fs::write(&path, vec![b'-'; 128]).unwrap();
+        let payloads = (0u8..64).map(|n| vec![b'A' + n % 26]).collect::<Vec<_>>();
+        let slices = payloads
+            .iter()
+            .enumerate()
+            .map(|(idx, data)| WriteSlice::new((idx * 2) as u64, data.as_slice()))
+            .collect::<Vec<_>>();
+        let file = OpenOptions::new().write(true).open(&path).await.unwrap();
+
+        file.write_slices_at(crate::WriteSlices::new(&slices).unwrap())
+            .await
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+
+        for (idx, data) in payloads.iter().enumerate() {
+            assert_eq!(bytes[idx * 2], data[0]);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -508,6 +592,19 @@ mod tests {
         let file = File::open(&path).await.unwrap();
         let result = file.read_all().await.unwrap();
         assert_eq!(result.as_ref().len(), 16);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn metadata_and_try_clone_use_same_file_contents() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("clone.bin");
+        std::fs::write(&path, b"clone me").unwrap();
+        let file = File::open(&path).await.unwrap();
+
+        let cloned = file.try_clone().unwrap();
+
+        assert_eq!(file.metadata().unwrap().len(), 8);
+        assert_eq!(cloned.read_all().await.unwrap().as_ref(), b"clone me");
     }
 
     #[tokio::test(flavor = "multi_thread")]

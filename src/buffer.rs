@@ -361,6 +361,16 @@ mod tests {
     }
 
     #[test]
+    fn zero_length_vec_has_mutable_empty_slice() {
+        let mut ob = OwnedBytes::from_vec(Vec::new());
+
+        let slice = ob.as_mut_slice().unwrap();
+
+        assert!(slice.is_empty());
+        assert!(ob.is_empty());
+    }
+
+    #[test]
     fn deref_matches_as_ref() {
         let ob = OwnedBytes::from_vec(vec![42u8; 8]);
         let via_deref: &[u8] = &ob;
@@ -394,6 +404,25 @@ mod tests {
     fn as_mut_slice_none_for_mmap() {
         let mut ob = OwnedBytes::Mmap(make_mmap_region());
         assert!(ob.as_mut_slice().is_none());
+    }
+
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn mmap_subregion_returns_requested_window() {
+        let region = make_mmap_region();
+
+        let subregion = region.subregion(6, 4).unwrap();
+
+        assert_eq!(subregion.as_slice(), b"mmap");
+    }
+
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn mmap_subregion_rejects_out_of_bounds_window() {
+        let region = make_mmap_region();
+
+        assert!(region.subregion(8, 3).is_none());
+        assert!(region.subregion(usize::MAX, 1).is_none());
     }
 
     #[test]

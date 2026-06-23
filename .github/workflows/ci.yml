@@ -34,14 +34,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Check default features
-        run: cargo check --all-targets
+      - name: Test default features
+        run: cargo test --all-targets
 
-      - name: Check no default features
-        run: cargo check --no-default-features --all-targets
+      - name: Test no default features
+        run: cargo test --no-default-features --all-targets
 
-      - name: Check Tokio without Rayon
-        run: cargo check --no-default-features --features tokio --all-targets
+      - name: Test Tokio without Rayon
+        run: cargo test --no-default-features --features tokio --all-targets
 
       - name: Test all features
         run: cargo test --all-features
@@ -49,9 +49,39 @@ jobs:
       - name: Clippy all features
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-  linux-feature-matrix:
-    name: Linux feature matrix
-    runs-on: ubuntu-latest
+  feature-test-matrix:
+    name: ${{ matrix.os }} / ${{ matrix.feature }} feature tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            feature: sync
+          - os: ubuntu-latest
+            feature: tokio
+          - os: ubuntu-latest
+            feature: mmap
+          - os: ubuntu-latest
+            feature: pool
+          - os: ubuntu-latest
+            feature: io-uring
+          - os: macos-latest
+            feature: sync
+          - os: macos-latest
+            feature: tokio
+          - os: macos-latest
+            feature: mmap
+          - os: macos-latest
+            feature: pool
+          - os: windows-latest
+            feature: sync
+          - os: windows-latest
+            feature: tokio
+          - os: windows-latest
+            feature: mmap
+          - os: windows-latest
+            feature: pool
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -62,14 +92,5 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Check sync only
-        run: cargo check --no-default-features --features sync --all-targets
-
-      - name: Check mmap only
-        run: cargo check --no-default-features --features mmap --all-targets
-
-      - name: Check pool only
-        run: cargo check --no-default-features --features pool --all-targets
-
-      - name: Check io-uring only
-        run: cargo check --no-default-features --features io-uring --all-targets
+      - name: Test feature
+        run: cargo test --no-default-features --features ${{ matrix.feature }} --all-targets
