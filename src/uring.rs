@@ -31,25 +31,6 @@ thread_local! {
     static CACHED_RING: RefCell<Option<IoUring>> = const { RefCell::new(None) };
 }
 
-fn with_ring<T>(depth: u32, f: impl FnOnce(&mut IoUring) -> io::Result<T>) -> io::Result<T> {
-    CACHED_RING.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let needs_new = match borrow.as_ref() {
-            None => true,
-            Some(ring) => ring.params().sq_entries() < depth,
-        };
-        if needs_new {
-            *borrow = Some(IoUring::new(depth).map_err(|err| {
-                Error::new(
-                    err.kind(),
-                    format!("failed to initialize io_uring with depth {depth}: {err}"),
-                )
-            })?);
-        }
-        f(borrow.as_mut().unwrap())
-    })
-}
-
 /// A Linux `io_uring` file handle.
 #[derive(Debug)]
 pub struct File<A = DefaultAllocator> {
@@ -183,7 +164,7 @@ impl<A: Allocator> File<A> {
             return Ok(());
         }
         let depth = self.ring_depth;
-        with_ring(depth, |ring| {
+        self.with_ring(|ring| {
             let total = buf.len();
             let chunk_size = self.chunk_size.min(total);
             let num_chunks = total.div_ceil(chunk_size);
@@ -287,7 +268,7 @@ impl<A: Allocator> File<A> {
             return Ok(0);
         }
         let len = buf.len().min(MAX_IO_LEN) as u32;
-        with_ring(self.ring_depth, |ring| {
+        self.with_ring(|ring| {
             let entry = opcode::Read::new(types::Fd(file.as_raw_fd()), buf.as_mut_ptr(), len)
                 .offset(offset)
                 .build();
@@ -318,7 +299,7 @@ impl<A: Allocator> File<A> {
             return Ok(());
         }
         let depth = self.ring_depth;
-        with_ring(depth, |ring| {
+        self.with_ring(|ring| {
             let total = data.len();
             let chunk_size = self.chunk_size.min(total);
             let num_chunks = total.div_ceil(chunk_size);
@@ -414,7 +395,7 @@ impl<A: Allocator> File<A> {
             return Ok(0);
         }
         let len = data.len().min(MAX_IO_LEN) as u32;
-        with_ring(self.ring_depth, |ring| {
+        self.with_ring(|ring| {
             let entry = opcode::Write::new(types::Fd(file.as_raw_fd()), data.as_ptr(), len)
                 .offset(offset)
                 .build();
@@ -444,7 +425,7 @@ impl<A: Allocator> File<A> {
             return Ok(());
         }
         let depth = self.ring_depth;
-        with_ring(depth, |ring| {
+        self.with_ring(|ring| {
             let n = writes.len();
             let mut done = vec![0usize; n];
             let mut state = vec![SubmissionState::Idle; n];
@@ -524,6 +505,26 @@ impl<A: Allocator> File<A> {
             }
 
             Ok(())
+        })
+    }
+
+    fn with_ring<T>(&self, f: impl FnOnce(&mut IoUring) -> io::Result<T>) -> io::Result<T> {
+        let depth = self.ring_depth;
+        CACHED_RING.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let needs_new = match borrow.as_ref() {
+                None => true,
+                Some(ring) => ring.params().sq_entries() < depth,
+            };
+            if needs_new {
+                *borrow = Some(IoUring::new(depth).map_err(|err| {
+                    Error::new(
+                        err.kind(),
+                        format!("failed to initialize io_uring with depth {depth}: {err}"),
+                    )
+                })?);
+            }
+            f(borrow.as_mut().unwrap())
         })
     }
 }

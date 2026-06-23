@@ -117,7 +117,26 @@ pub struct Pool;
 impl Allocator for Pool {
     #[inline]
     fn allocate(&self, len: usize) -> OwnedBytes {
-        OwnedBytes::Pooled(get_buffer_pool().get(len))
+        use std::sync::OnceLock;
+        static POOL: OnceLock<BufferPool> = OnceLock::new();
+        let pool = POOL.get_or_init(|| {
+            BufferPool::builder()
+                .num_shards(8)
+                .tls_cache_size(4)
+                .max_buffers_per_shard(32)
+                .min_buffer_size(1024 * 1024)
+                .build()
+        });
+        OwnedBytes::Pooled(pool.get(len))
+    }
+}
+
+#[cfg(feature = "pool")]
+impl Pool {
+    /// Creates a pool-backed allocator.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
     }
 }
 
@@ -128,24 +147,6 @@ pub type DefaultAllocator = Pool;
 /// Default read allocator for this build.
 #[cfg(not(feature = "pool"))]
 pub type DefaultAllocator = System;
-
-/// Returns the process-wide sharded buffer pool.
-///
-/// Initialised on first use with the default pool settings.
-#[cfg(feature = "pool")]
-#[must_use]
-pub(crate) fn get_buffer_pool() -> &'static BufferPool {
-    use std::sync::OnceLock;
-    static POOL: OnceLock<BufferPool> = OnceLock::new();
-    POOL.get_or_init(|| {
-        BufferPool::builder()
-            .num_shards(8)
-            .tls_cache_size(4)
-            .max_buffers_per_shard(32)
-            .min_buffer_size(1024 * 1024)
-            .build()
-    })
-}
 
 // ============================================================================
 // OwnedBytes
@@ -330,10 +331,9 @@ mod tests {
     #[cfg(feature = "pool")]
     #[test]
     fn from_pooled_roundtrips() {
-        let pool = get_buffer_pool();
-        let mut buf = pool.get(8);
+        let mut ob = Pool::new().allocate(8);
+        let buf = ob.as_mut_slice().unwrap();
         buf[..4].copy_from_slice(&[10, 20, 30, 40]);
-        let ob = OwnedBytes::from_pooled(buf);
         assert_eq!(&ob.as_ref()[..4], &[10, 20, 30, 40]);
     }
 
@@ -393,9 +393,7 @@ mod tests {
     #[cfg(feature = "pool")]
     #[test]
     fn as_mut_slice_some_for_pooled() {
-        let pool = get_buffer_pool();
-        let buf = pool.get(4);
-        let mut ob = OwnedBytes::Pooled(buf);
+        let mut ob = Pool::new().allocate(4);
         assert!(ob.as_mut_slice().is_some());
     }
 
@@ -449,9 +447,8 @@ mod tests {
 
     #[cfg(feature = "pool")]
     #[test]
-    fn buffer_pool_is_singleton() {
-        let p1 = get_buffer_pool() as *const _;
-        let p2 = get_buffer_pool() as *const _;
-        assert_eq!(p1, p2);
+    fn pool_allocator_returns_pooled_bytes() {
+        let ob = Pool::new().allocate(4);
+        assert!(matches!(ob, OwnedBytes::Pooled(_)));
     }
 }

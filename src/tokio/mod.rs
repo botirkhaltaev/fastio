@@ -104,7 +104,7 @@ impl<A: Allocator> File<A> {
             if buf.len() != len {
                 return Err(io::Error::other("allocator returned wrong-sized buffer"));
             }
-            read_at_positioned(&file, 0, buf)?;
+            Self::read_at_positioned(&file, 0, buf)?;
             Ok(bytes)
         })
         .await
@@ -126,7 +126,7 @@ impl<A: Allocator> File<A> {
             if buf.len() != len {
                 return Err(io::Error::other("allocator returned wrong-sized buffer"));
             }
-            read_at_positioned(&file, offset, buf)?;
+            Self::read_at_positioned(&file, offset, buf)?;
             Ok(bytes)
         })
         .await
@@ -142,7 +142,7 @@ impl<A: Allocator> File<A> {
         let len = buf.len();
         let bytes = ::tokio::task::spawn_blocking(move || {
             let mut bytes = vec![0u8; len];
-            read_at_positioned(&file, offset, &mut bytes)?;
+            Self::read_at_positioned(&file, offset, &mut bytes)?;
             Ok::<_, io::Error>(bytes)
         })
         .await
@@ -158,7 +158,7 @@ impl<A: Allocator> File<A> {
         }
         let file = self.inner.try_clone().await?.into_std().await;
         let bytes = buf.to_vec();
-        ::tokio::task::spawn_blocking(move || write_at_positioned(&file, offset, &bytes))
+        ::tokio::task::spawn_blocking(move || Self::write_at_positioned(&file, offset, &bytes))
             .await
             .map_err(io::Error::other)?
     }
@@ -185,7 +185,7 @@ impl<A: Allocator> File<A> {
                     let handles = batch
                         .iter()
                         .map(|(offset, data)| {
-                            scope.spawn(|| write_at_positioned(&file, *offset, data))
+                            scope.spawn(|| Self::write_at_positioned(&file, *offset, data))
                         })
                         .collect::<Vec<_>>();
                     for handle in handles {
@@ -200,6 +200,70 @@ impl<A: Allocator> File<A> {
         })
         .await
         .map_err(io::Error::other)?
+    }
+
+    /// Positioned read that doesn't require a seek.
+    #[cfg(unix)]
+    fn read_at_positioned(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> IoResult<()> {
+        use std::os::unix::fs::FileExt;
+        file.read_exact_at(buf, offset)
+    }
+
+    #[cfg(windows)]
+    fn read_at_positioned(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> IoResult<()> {
+        use std::os::windows::fs::FileExt;
+        let mut handle = file;
+        let original_position = handle.stream_position()?;
+        let mut read = 0;
+        let mut result = Ok(());
+        while read < buf.len() {
+            let read_offset = offset.checked_add(read as u64).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "read offset overflow")
+            })?;
+            let n = file.seek_read(&mut buf[read..], read_offset)?;
+            if n == 0 {
+                result = Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unexpected EOF during positioned read",
+                ));
+                break;
+            }
+            read += n;
+        }
+        let restore = handle.seek(std::io::SeekFrom::Start(original_position));
+        result.and(restore.map(|_| ()))
+    }
+
+    /// Positioned write that doesn't require a seek.
+    #[cfg(unix)]
+    fn write_at_positioned(file: &std::fs::File, offset: u64, data: &[u8]) -> IoResult<()> {
+        use std::os::unix::fs::FileExt;
+        file.write_all_at(data, offset)
+    }
+
+    #[cfg(windows)]
+    fn write_at_positioned(file: &std::fs::File, offset: u64, data: &[u8]) -> IoResult<()> {
+        use std::os::windows::fs::FileExt;
+        let mut handle = file;
+        let original_position = handle.stream_position()?;
+        let mut written = 0;
+        let mut result = Ok(());
+        while written < data.len() {
+            let write_offset = offset.checked_add(written as u64).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "write offset overflow")
+            })?;
+            let n = file.seek_write(&data[written..], write_offset)?;
+            if n == 0 {
+                result = Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "seek_write returned zero bytes",
+                ));
+                break;
+            }
+            written += n;
+        }
+        let restore = handle.seek(std::io::SeekFrom::Start(original_position));
+        result.and(restore.map(|_| ()))
     }
 }
 
@@ -309,70 +373,6 @@ impl Default for OpenOptions<DefaultAllocator> {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Positioned read that doesn't require a seek (uses OS-level pread).
-#[cfg(unix)]
-fn read_at_positioned(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> IoResult<()> {
-    use std::os::unix::fs::FileExt;
-    file.read_exact_at(buf, offset)
-}
-
-#[cfg(windows)]
-fn read_at_positioned(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> IoResult<()> {
-    use std::os::windows::fs::FileExt;
-    let mut handle = file;
-    let original_position = handle.stream_position()?;
-    let mut read = 0;
-    let mut result = Ok(());
-    while read < buf.len() {
-        let read_offset = offset
-            .checked_add(read as u64)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "read offset overflow"))?;
-        let n = file.seek_read(&mut buf[read..], read_offset)?;
-        if n == 0 {
-            result = Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "unexpected EOF during positioned read",
-            ));
-            break;
-        }
-        read += n;
-    }
-    let restore = handle.seek(std::io::SeekFrom::Start(original_position));
-    result.and(restore.map(|_| ()))
-}
-
-/// Positioned write that doesn't require a seek (uses OS-level pwrite).
-#[cfg(unix)]
-fn write_at_positioned(file: &std::fs::File, offset: u64, data: &[u8]) -> IoResult<()> {
-    use std::os::unix::fs::FileExt;
-    file.write_all_at(data, offset)
-}
-
-#[cfg(windows)]
-fn write_at_positioned(file: &std::fs::File, offset: u64, data: &[u8]) -> IoResult<()> {
-    use std::os::windows::fs::FileExt;
-    let mut handle = file;
-    let original_position = handle.stream_position()?;
-    let mut written = 0;
-    let mut result = Ok(());
-    while written < data.len() {
-        let write_offset = offset
-            .checked_add(written as u64)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "write offset overflow"))?;
-        let n = file.seek_write(&data[written..], write_offset)?;
-        if n == 0 {
-            result = Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "seek_write returned zero bytes",
-            ));
-            break;
-        }
-        written += n;
-    }
-    let restore = handle.seek(std::io::SeekFrom::Start(original_position));
-    result.and(restore.map(|_| ()))
 }
 
 #[cfg(test)]
