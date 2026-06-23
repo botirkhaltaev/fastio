@@ -861,12 +861,15 @@ fn bench_cursor_write(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// 11. read_at_batch — batched positioned reads (io_uring)
+// 11. read_at_batch — batched positioned reads (io_uring, unix only)
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 const BATCH_SIZES: &[usize] = &[4, 16, 64, 256];
+#[cfg(unix)]
 const BATCH_READ_LEN: usize = 4096;
 
+#[cfg(unix)]
 fn bench_read_at_batch(c: &mut Criterion) {
     let fixture = Fixture::new();
     // Use a 16 MiB file so all batch reads fit
@@ -931,6 +934,7 @@ fn bench_read_at_batch(c: &mut Criterion) {
 // Criterion harness
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 criterion_group!(
     benches,
     bench_read_all,
@@ -945,4 +949,20 @@ criterion_group!(
     bench_cursor_write,
     bench_read_at_batch,
 );
+
+#[cfg(not(unix))]
+criterion_group!(
+    benches,
+    bench_read_all,
+    bench_read_at,
+    bench_write_all_at,
+    bench_write_slices,
+    bench_allocator,
+    bench_mmap,
+    bench_async_read,
+    bench_async_write,
+    bench_cursor_read,
+    bench_cursor_write,
+);
+
 criterion_main!(benches);

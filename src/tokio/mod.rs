@@ -56,6 +56,21 @@ impl File<DefaultAllocator> {
 }
 
 impl<A: Allocator> File<A> {
+    /// Returns a file handle safe for concurrent positioned I/O.
+    ///
+    /// On Unix, shares the cached handle (pread/pwrite are position-independent).
+    /// On Windows, clones to avoid seek races.
+    fn positioned_handle(&self) -> io::Result<Arc<std::fs::File>> {
+        #[cfg(unix)]
+        {
+            Ok(self.std_file.clone())
+        }
+        #[cfg(windows)]
+        {
+            Ok(Arc::new(self.std_file.as_ref().try_clone()?))
+        }
+    }
+
     /// Creates a new `File` instance sharing the same underlying handle.
     pub async fn try_clone(&self) -> io::Result<Self> {
         let inner = self.inner.try_clone().await?;
@@ -94,7 +109,7 @@ impl<A: Allocator> File<A> {
 
     /// Reads the whole file into memory from offset 0.
     pub async fn read_all(&self) -> io::Result<OwnedBytes> {
-        let file = self.std_file.clone();
+        let file = self.positioned_handle()?;
         let allocator = self.allocator.clone();
         ::tokio::task::spawn_blocking(move || {
             let len = usize::try_from(file.metadata()?.len())
@@ -121,7 +136,7 @@ impl<A: Allocator> File<A> {
         if len == 0 {
             return Ok(OwnedBytes::Vec(Vec::new()));
         }
-        let file = self.std_file.clone();
+        let file = self.positioned_handle()?;
         let allocator = self.allocator.clone();
         ::tokio::task::spawn_blocking(move || {
             let mut bytes = allocator.allocate(len);
@@ -143,7 +158,7 @@ impl<A: Allocator> File<A> {
         if buf.is_empty() {
             return Ok(());
         }
-        let file = self.std_file.clone();
+        let file = self.positioned_handle()?;
         let len = buf.len();
         let bytes = ::tokio::task::spawn_blocking(move || {
             let mut bytes = vec![0u8; len];
@@ -161,7 +176,7 @@ impl<A: Allocator> File<A> {
         if buf.is_empty() {
             return Ok(());
         }
-        let file = self.std_file.clone();
+        let file = self.positioned_handle()?;
         let bytes = buf.to_vec();
         ::tokio::task::spawn_blocking(move || Self::write_at_positioned(&file, offset, &bytes))
             .await
@@ -170,7 +185,7 @@ impl<A: Allocator> File<A> {
 
     /// Writes non-overlapping slices at their offsets.
     pub async fn write_slices_at(&self, writes: WriteSlices<'_, '_>) -> io::Result<()> {
-        let file = self.std_file.clone();
+        let file = self.positioned_handle()?;
         let writes = writes
             .as_slice()
             .iter()

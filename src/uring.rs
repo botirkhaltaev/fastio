@@ -19,7 +19,6 @@ use crate::{Allocator, DefaultAllocator, OwnedBytes, WriteSlice, WriteSlices};
 const DEFAULT_RING_DEPTH: u32 = 256;
 const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 const MAX_IO_LEN: usize = u32::MAX as usize;
-const URING_READ_THRESHOLD: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubmissionState {
@@ -141,26 +140,12 @@ impl<A: Allocator> File<A> {
     }
 
     /// Reads exactly enough bytes to fill `buf` at `offset`.
-    ///
-    /// Small reads below the io_uring submission threshold use direct pread
-    /// to avoid per-operation SQ overhead.
     pub fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        if buf.len() < URING_READ_THRESHOLD {
-            use std::os::unix::fs::FileExt;
-            return self.inner.read_exact_at(buf, offset);
-        }
         self.submit_read_exact_at(&self.inner, offset, buf)
     }
 
     /// Writes all bytes from `buf` at `offset`.
-    ///
-    /// Small writes below the io_uring submission threshold use direct pwrite
-    /// to avoid per-operation SQ overhead.
     pub fn write_all_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
-        if buf.len() < URING_READ_THRESHOLD {
-            use std::os::unix::fs::FileExt;
-            return self.inner.write_all_at(buf, offset);
-        }
         self.submit_write_exact_at(&self.inner, offset, buf)
     }
 
@@ -662,12 +647,7 @@ impl<A: Allocator> Read for File<A> {
             .position
             .lock()
             .map_err(|_| Error::other("file position lock poisoned"))?;
-        let n = if buf.len() < URING_READ_THRESHOLD {
-            use std::os::unix::fs::FileExt;
-            self.inner.read_at(buf, *position)?
-        } else {
-            self.submit_read_at(&self.inner, *position, buf)?
-        };
+        let n = self.submit_read_at(&self.inner, *position, buf)?;
         *position = position
             .checked_add(n as u64)
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "file position overflow"))?;
@@ -681,12 +661,7 @@ impl<A: Allocator> Write for File<A> {
             .position
             .lock()
             .map_err(|_| Error::other("file position lock poisoned"))?;
-        let n = if buf.len() < URING_READ_THRESHOLD {
-            use std::os::unix::fs::FileExt;
-            self.inner.write_at(buf, *position)?
-        } else {
-            self.submit_write_at(&self.inner, *position, buf)?
-        };
+        let n = self.submit_write_at(&self.inner, *position, buf)?;
         if n == 0 && !buf.is_empty() {
             return Err(Error::new(ErrorKind::WriteZero, "short write"));
         }

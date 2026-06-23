@@ -94,9 +94,6 @@ impl std::ops::Deref for MmapRegion {
 /// exactly `len` bytes.
 pub trait Allocator: Clone + Send + Sync + std::fmt::Debug + 'static {
     /// Allocate a mutable buffer of `len` bytes.
-    ///
-    /// The returned buffer may contain uninitialized data. Callers must fill
-    /// every byte (e.g. via `read_exact_at`) before reading the contents.
     fn allocate(&self, len: usize) -> OwnedBytes;
 }
 
@@ -106,14 +103,8 @@ pub struct System;
 
 impl Allocator for System {
     #[inline]
-    #[allow(clippy::uninit_vec)]
     fn allocate(&self, len: usize) -> OwnedBytes {
-        let mut v = Vec::with_capacity(len);
-        // SAFETY: all callers fill every byte via read_exact_at before reading.
-        // On I/O error the buffer is dropped without being read; Vec::drop for
-        // u8 does not inspect element values.
-        unsafe { v.set_len(len) };
-        OwnedBytes::Vec(v)
+        OwnedBytes::Vec(vec![0u8; len])
     }
 }
 
