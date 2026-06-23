@@ -40,7 +40,111 @@ fn with_ring<T>(depth: u32, f: impl FnOnce(&mut IoUring) -> io::Result<T>) -> io
     })
 }
 
+/// A Linux `io_uring` file handle.
+#[derive(Debug)]
+pub struct File {
+    inner: std::fs::File,
+    ring_depth: u32,
+    chunk_size: usize,
+}
+
 impl File {
+    /// Opens a file in read-only mode.
+    pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        OpenOptions::new().read(true).open(path)
+    }
+
+    /// Opens a file in write-only mode, truncating it if it exists.
+    pub fn create<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+    }
+
+    /// Opens a file in write-only mode, failing if it already exists.
+    pub fn create_new<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        OpenOptions::new().write(true).create_new(true).open(path)
+    }
+
+    /// Returns a new options object for opening a file.
+    #[must_use]
+    pub fn options() -> OpenOptions {
+        OpenOptions::new()
+    }
+
+    /// Creates a new `File` instance sharing the same underlying handle.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            inner: self.inner.try_clone()?,
+            ring_depth: self.ring_depth,
+            chunk_size: self.chunk_size,
+        })
+    }
+
+    /// Queries metadata about the underlying file.
+    pub fn metadata(&self) -> io::Result<Metadata> {
+        self.inner.metadata()
+    }
+
+    /// Truncates or extends the underlying file.
+    pub fn set_len(&self, size: u64) -> io::Result<()> {
+        self.inner.set_len(size)
+    }
+
+    /// Attempts to sync all OS-internal file content and metadata to disk.
+    pub fn sync_all(&self) -> io::Result<()> {
+        self.inner.sync_all()
+    }
+
+    /// Attempts to sync file content to disk.
+    pub fn sync_data(&self) -> io::Result<()> {
+        self.inner.sync_data()
+    }
+
+    /// Changes permissions on the underlying file.
+    pub fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
+        self.inner.set_permissions(perm)
+    }
+
+    /// Reads the whole file into memory from offset 0.
+    pub fn read_all(&self) -> io::Result<OwnedBytes> {
+        let len = usize::try_from(self.inner.metadata()?.len())
+            .map_err(|_| io::Error::other("file too large"))?;
+        if len == 0 {
+            return Ok(OwnedBytes::Vec(Vec::new()));
+        }
+        let mut bytes = vec![0; len];
+        self.submit_read_exact_at(&self.inner, 0, &mut bytes)?;
+        Ok(OwnedBytes::Vec(bytes))
+    }
+
+    /// Reads `len` bytes at `offset` into a new buffer.
+    pub fn read_at(&self, offset: u64, len: usize) -> io::Result<OwnedBytes> {
+        if len == 0 {
+            return Ok(OwnedBytes::Vec(Vec::new()));
+        }
+        let mut bytes = vec![0; len];
+        self.read_exact_at(offset, &mut bytes)?;
+        Ok(OwnedBytes::Vec(bytes))
+    }
+
+    /// Reads exactly enough bytes to fill `buf` at `offset`.
+    pub fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.submit_read_exact_at(&self.inner, offset, buf)
+    }
+
+    /// Writes all bytes from `buf` at `offset`.
+    pub fn write_all_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
+        self.submit_write_exact_at(&self.inner, offset, buf)
+    }
+
+    /// Writes non-overlapping slices at their offsets.
+    pub fn write_slices_at(&self, writes: WriteSlices<'_>) -> io::Result<()> {
+        self.submit_write_slices_at(&self.inner, writes.as_slice())
+    }
+
     fn submit_read_exact_at(
         &self,
         file: &std::fs::File,
@@ -281,112 +385,6 @@ impl File {
 
             Ok(())
         })
-    }
-}
-
-/// A Linux `io_uring` file handle.
-#[derive(Debug)]
-pub struct File {
-    inner: std::fs::File,
-    ring_depth: u32,
-    chunk_size: usize,
-}
-
-impl File {
-    /// Opens a file in read-only mode.
-    pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        OpenOptions::new().read(true).open(path)
-    }
-
-    /// Opens a file in write-only mode, truncating it if it exists.
-    pub fn create<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)
-    }
-
-    /// Opens a file in write-only mode, failing if it already exists.
-    pub fn create_new<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        OpenOptions::new().write(true).create_new(true).open(path)
-    }
-
-    /// Returns a new options object for opening a file.
-    #[must_use]
-    pub fn options() -> OpenOptions {
-        OpenOptions::new()
-    }
-
-    /// Creates a new `File` instance sharing the same underlying handle.
-    pub fn try_clone(&self) -> io::Result<Self> {
-        Ok(Self {
-            inner: self.inner.try_clone()?,
-            ring_depth: self.ring_depth,
-            chunk_size: self.chunk_size,
-        })
-    }
-
-    /// Queries metadata about the underlying file.
-    pub fn metadata(&self) -> io::Result<Metadata> {
-        self.inner.metadata()
-    }
-
-    /// Truncates or extends the underlying file.
-    pub fn set_len(&self, size: u64) -> io::Result<()> {
-        self.inner.set_len(size)
-    }
-
-    /// Attempts to sync all OS-internal file content and metadata to disk.
-    pub fn sync_all(&self) -> io::Result<()> {
-        self.inner.sync_all()
-    }
-
-    /// Attempts to sync file content to disk.
-    pub fn sync_data(&self) -> io::Result<()> {
-        self.inner.sync_data()
-    }
-
-    /// Changes permissions on the underlying file.
-    pub fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
-        self.inner.set_permissions(perm)
-    }
-
-    /// Reads the whole file into memory from offset 0.
-    pub fn read_all(&self) -> io::Result<OwnedBytes> {
-        let len = usize::try_from(self.inner.metadata()?.len())
-            .map_err(|_| io::Error::other("file too large"))?;
-        if len == 0 {
-            return Ok(OwnedBytes::Vec(Vec::new()));
-        }
-        let mut bytes = vec![0; len];
-        self.submit_read_exact_at(&self.inner, 0, &mut bytes)?;
-        Ok(OwnedBytes::Vec(bytes))
-    }
-
-    /// Reads `len` bytes at `offset` into a new buffer.
-    pub fn read_at(&self, offset: u64, len: usize) -> io::Result<OwnedBytes> {
-        if len == 0 {
-            return Ok(OwnedBytes::Vec(Vec::new()));
-        }
-        let mut bytes = vec![0; len];
-        self.read_exact_at(offset, &mut bytes)?;
-        Ok(OwnedBytes::Vec(bytes))
-    }
-
-    /// Reads exactly enough bytes to fill `buf` at `offset`.
-    pub fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        self.submit_read_exact_at(&self.inner, offset, buf)
-    }
-
-    /// Writes all bytes from `buf` at `offset`.
-    pub fn write_all_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
-        self.submit_write_exact_at(&self.inner, offset, buf)
-    }
-
-    /// Writes non-overlapping slices at their offsets.
-    pub fn write_slices_at(&self, writes: WriteSlices<'_>) -> io::Result<()> {
-        self.submit_write_slices_at(&self.inner, writes.as_slice())
     }
 }
 
