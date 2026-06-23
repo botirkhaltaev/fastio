@@ -8,6 +8,7 @@ use std::io;
 #[cfg(windows)]
 use std::io::Seek;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::{Allocator, DefaultAllocator, IoResult, OwnedBytes, WriteSlices};
 
@@ -18,6 +19,7 @@ compile_error!("fastio tokio supports Linux, macOS, and Windows only");
 #[derive(Debug)]
 pub struct File<A = DefaultAllocator> {
     inner: ::tokio::fs::File,
+    std_file: Arc<std::fs::File>,
     allocator: A,
 }
 
@@ -56,8 +58,11 @@ impl File<DefaultAllocator> {
 impl<A: Allocator> File<A> {
     /// Creates a new `File` instance sharing the same underlying handle.
     pub async fn try_clone(&self) -> io::Result<Self> {
+        let inner = self.inner.try_clone().await?;
+        let std_file = Arc::new(inner.try_clone().await?.into_std().await);
         Ok(Self {
-            inner: self.inner.try_clone().await?,
+            inner,
+            std_file,
             allocator: self.allocator.clone(),
         })
     }
@@ -89,7 +94,7 @@ impl<A: Allocator> File<A> {
 
     /// Reads the whole file into memory from offset 0.
     pub async fn read_all(&self) -> io::Result<OwnedBytes> {
-        let file = self.inner.try_clone().await?.into_std().await;
+        let file = self.std_file.clone();
         let allocator = self.allocator.clone();
         ::tokio::task::spawn_blocking(move || {
             let len = usize::try_from(file.metadata()?.len())
@@ -116,7 +121,7 @@ impl<A: Allocator> File<A> {
         if len == 0 {
             return Ok(OwnedBytes::Vec(Vec::new()));
         }
-        let file = self.inner.try_clone().await?.into_std().await;
+        let file = self.std_file.clone();
         let allocator = self.allocator.clone();
         ::tokio::task::spawn_blocking(move || {
             let mut bytes = allocator.allocate(len);
@@ -138,7 +143,7 @@ impl<A: Allocator> File<A> {
         if buf.is_empty() {
             return Ok(());
         }
-        let file = self.inner.try_clone().await?.into_std().await;
+        let file = self.std_file.clone();
         let len = buf.len();
         let bytes = ::tokio::task::spawn_blocking(move || {
             let mut bytes = vec![0u8; len];
@@ -156,7 +161,7 @@ impl<A: Allocator> File<A> {
         if buf.is_empty() {
             return Ok(());
         }
-        let file = self.inner.try_clone().await?.into_std().await;
+        let file = self.std_file.clone();
         let bytes = buf.to_vec();
         ::tokio::task::spawn_blocking(move || Self::write_at_positioned(&file, offset, &bytes))
             .await
@@ -165,7 +170,7 @@ impl<A: Allocator> File<A> {
 
     /// Writes non-overlapping slices at their offsets.
     pub async fn write_slices_at(&self, writes: WriteSlices<'_, '_>) -> io::Result<()> {
-        let file = self.inner.try_clone().await?.into_std().await;
+        let file = self.std_file.clone();
         let writes = writes
             .as_slice()
             .iter()
@@ -362,10 +367,13 @@ impl<A: Allocator> OpenOptions<A> {
             .create(self.create)
             .create_new(self.create_new);
         let allocator = self.allocator.clone();
-        options
-            .open(path)
-            .await
-            .map(|inner| File { inner, allocator })
+        let inner = options.open(path).await?;
+        let std_file = Arc::new(inner.try_clone().await?.into_std().await);
+        Ok(File {
+            inner,
+            std_file,
+            allocator,
+        })
     }
 }
 
