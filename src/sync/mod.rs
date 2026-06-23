@@ -9,6 +9,13 @@ use std::path::{Path, PathBuf};
 
 use crate::{OwnedBytes, WriteSlice, WriteSlices};
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
+
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 compile_error!("fastio sync supports Linux, macOS, and Windows only");
 
@@ -106,58 +113,22 @@ impl File {
 
     /// Reads exactly enough bytes to fill `buf` at `offset`.
     pub fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            self.inner.read_exact_at(buf, offset)
-        }
-
+        #[cfg(target_os = "linux")]
+        return linux::read_exact_at(&self.inner, offset, buf);
+        #[cfg(target_os = "macos")]
+        return macos::read_exact_at(&self.inner, offset, buf);
         #[cfg(windows)]
-        {
-            use std::os::windows::fs::FileExt;
-            let mut read = 0usize;
-            while read < buf.len() {
-                let n = self
-                    .inner
-                    .seek_read(&mut buf[read..], offset + read as u64)?;
-                if n == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "seek_read returned zero bytes before buffer was filled",
-                    ));
-                }
-                read += n;
-            }
-            Ok(())
-        }
+        return windows::read_exact_at(&self.inner, offset, buf);
     }
 
     /// Writes all bytes from `buf` at `offset`.
     pub fn write_all_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            self.inner.write_all_at(buf, offset)
-        }
-
+        #[cfg(target_os = "linux")]
+        return linux::write_all_at(&self.inner, offset, buf);
+        #[cfg(target_os = "macos")]
+        return macos::write_all_at(&self.inner, offset, buf);
         #[cfg(windows)]
-        {
-            use std::os::windows::fs::FileExt;
-            let mut written = 0usize;
-            while written < buf.len() {
-                let n = self
-                    .inner
-                    .seek_write(&buf[written..], offset + written as u64)?;
-                if n == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "seek_write returned zero bytes",
-                    ));
-                }
-                written += n;
-            }
-            Ok(())
-        }
+        return windows::write_all_at(&self.inner, offset, buf);
     }
 
     /// Writes non-overlapping slices at their offsets.
@@ -263,25 +234,11 @@ impl OpenOptions {
     /// Opens a file with the configured options.
     pub fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
         #[cfg(target_os = "linux")]
-        let inner = {
-            let mut options = self.inner.clone();
-            if self.direct_io {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.custom_flags(libc::O_DIRECT);
-            }
-            options.open(path)?
-        };
-
-        #[cfg(not(target_os = "linux"))]
-        let inner = {
-            if self.direct_io {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "direct I/O is only supported on Linux",
-                ));
-            }
-            self.inner.open(path)?
-        };
+        let inner = linux::open(&self.inner, self.direct_io, path.as_ref())?;
+        #[cfg(target_os = "macos")]
+        let inner = macos::open(&self.inner, self.direct_io, path.as_ref())?;
+        #[cfg(target_os = "windows")]
+        let inner = windows::open(&self.inner, self.direct_io, path.as_ref())?;
 
         Ok(File { inner })
     }

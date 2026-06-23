@@ -7,7 +7,7 @@ Guidelines for agents editing the `sync` backend.
 - Keep the public API shaped like `std::fs`: backend-owned `File`, `OpenOptions`, and module functions.
 - Do not add Rayon to the `sync` feature unless a measured file API need appears.
 - Linux O_DIRECT behavior should remain operation-time behavior, not construction-time availability checking.
-- Do not split platform code or add abstractions unless duplication becomes a proven maintenance problem.
+- Keep platform-sensitive implementation code split by OS (`linux.rs`, `macos.rs`, `windows.rs`). Shared public API belongs in `mod.rs`.
 
 ## Validation
 
