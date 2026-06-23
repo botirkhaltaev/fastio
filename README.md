@@ -9,7 +9,7 @@ Fast file I/O backends for Rust libraries and applications.
 - `sync`: synchronous file I/O with positioned read/write methods.
 - `tokio`: async I/O using Tokio, without a Rayon dependency.
 - `mmap`: read-only memory maps using `memmap2`.
-- `io-uring`: Linux-only `io_uring` backend.
+- `io-uring`: Linux-only `io_uring` backend. Cursor traits and positioned methods are ring-backed; append mode is intentionally unsupported.
 - `pool`: pooled read buffers using `zeropool`.
 
 Default features enable all supported backends for the current platform.

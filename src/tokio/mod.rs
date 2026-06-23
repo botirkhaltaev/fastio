@@ -17,7 +17,7 @@ compile_error!("fastio tokio supports Linux, macOS, and Windows only");
 /// A Tokio-backed file handle.
 #[derive(Debug)]
 pub struct File<A = DefaultAllocator> {
-    inner: std::fs::File,
+    inner: ::tokio::fs::File,
     allocator: A,
 }
 
@@ -55,54 +55,41 @@ impl File<DefaultAllocator> {
 
 impl<A: Allocator> File<A> {
     /// Creates a new `File` instance sharing the same underlying handle.
-    pub fn try_clone(&self) -> io::Result<Self> {
-        let file = self.inner.try_clone()?;
+    pub async fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
-            inner: file,
+            inner: self.inner.try_clone().await?,
             allocator: self.allocator.clone(),
         })
     }
 
     /// Queries metadata about the underlying file.
-    pub fn metadata(&self) -> io::Result<Metadata> {
-        self.inner.metadata()
+    pub async fn metadata(&self) -> io::Result<Metadata> {
+        self.inner.metadata().await
     }
 
     /// Truncates or extends the underlying file.
     pub async fn set_len(&self, size: u64) -> io::Result<()> {
-        let file = self.inner.try_clone()?;
-        ::tokio::task::spawn_blocking(move || file.set_len(size))
-            .await
-            .map_err(io::Error::other)?
+        self.inner.set_len(size).await
     }
 
     /// Attempts to sync all OS-internal file content and metadata to disk.
     pub async fn sync_all(&self) -> io::Result<()> {
-        let file = self.inner.try_clone()?;
-        ::tokio::task::spawn_blocking(move || file.sync_all())
-            .await
-            .map_err(io::Error::other)?
+        self.inner.sync_all().await
     }
 
     /// Attempts to sync file content to disk.
     pub async fn sync_data(&self) -> io::Result<()> {
-        let file = self.inner.try_clone()?;
-        ::tokio::task::spawn_blocking(move || file.sync_data())
-            .await
-            .map_err(io::Error::other)?
+        self.inner.sync_data().await
     }
 
     /// Changes permissions on the underlying file.
     pub async fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
-        let file = self.inner.try_clone()?;
-        ::tokio::task::spawn_blocking(move || file.set_permissions(perm))
-            .await
-            .map_err(io::Error::other)?
+        self.inner.set_permissions(perm).await
     }
 
     /// Reads the whole file into memory from offset 0.
     pub async fn read_all(&self) -> io::Result<OwnedBytes> {
-        let file = self.inner.try_clone()?;
+        let file = self.inner.try_clone().await?.into_std().await;
         let allocator = self.allocator.clone();
         ::tokio::task::spawn_blocking(move || {
             let len = usize::try_from(file.metadata()?.len())
@@ -129,7 +116,7 @@ impl<A: Allocator> File<A> {
         if len == 0 {
             return Ok(OwnedBytes::Vec(Vec::new()));
         }
-        let file = self.inner.try_clone()?;
+        let file = self.inner.try_clone().await?.into_std().await;
         let allocator = self.allocator.clone();
         ::tokio::task::spawn_blocking(move || {
             let mut bytes = allocator.allocate(len);
@@ -151,7 +138,7 @@ impl<A: Allocator> File<A> {
         if buf.is_empty() {
             return Ok(());
         }
-        let file = self.inner.try_clone()?;
+        let file = self.inner.try_clone().await?.into_std().await;
         let len = buf.len();
         let bytes = ::tokio::task::spawn_blocking(move || {
             let mut bytes = vec![0u8; len];
@@ -169,7 +156,7 @@ impl<A: Allocator> File<A> {
         if buf.is_empty() {
             return Ok(());
         }
-        let file = self.inner.try_clone()?;
+        let file = self.inner.try_clone().await?.into_std().await;
         let bytes = buf.to_vec();
         ::tokio::task::spawn_blocking(move || write_at_positioned(&file, offset, &bytes))
             .await
@@ -178,7 +165,7 @@ impl<A: Allocator> File<A> {
 
     /// Writes non-overlapping slices at their offsets.
     pub async fn write_slices_at(&self, writes: WriteSlices<'_, '_>) -> io::Result<()> {
-        let file = self.inner.try_clone()?;
+        let file = self.inner.try_clone().await?.into_std().await;
         let writes = writes
             .as_slice()
             .iter()
@@ -216,8 +203,8 @@ impl<A: Allocator> File<A> {
     }
 }
 
-impl<A> AsRef<std::fs::File> for File<A> {
-    fn as_ref(&self) -> &std::fs::File {
+impl<A> AsRef<::tokio::fs::File> for File<A> {
+    fn as_ref(&self) -> &::tokio::fs::File {
         &self.inner
     }
 }
@@ -225,7 +212,12 @@ impl<A> AsRef<std::fs::File> for File<A> {
 /// Options and flags for opening a Tokio-backed file.
 #[derive(Debug, Clone)]
 pub struct OpenOptions<A = DefaultAllocator> {
-    inner: std::fs::OpenOptions,
+    read: bool,
+    write: bool,
+    append: bool,
+    truncate: bool,
+    create: bool,
+    create_new: bool,
     allocator: A,
 }
 
@@ -234,7 +226,12 @@ impl OpenOptions<DefaultAllocator> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: std::fs::OpenOptions::new(),
+            read: false,
+            write: false,
+            append: false,
+            truncate: false,
+            create: false,
+            create_new: false,
             allocator: DefaultAllocator::default(),
         }
     }
@@ -243,58 +240,68 @@ impl OpenOptions<DefaultAllocator> {
 impl<A: Allocator> OpenOptions<A> {
     /// Sets read access.
     pub fn read(&mut self, read: bool) -> &mut Self {
-        self.inner.read(read);
+        self.read = read;
         self
     }
 
     /// Sets write access.
     pub fn write(&mut self, write: bool) -> &mut Self {
-        self.inner.write(write);
+        self.write = write;
         self
     }
 
     /// Sets append mode.
     pub fn append(&mut self, append: bool) -> &mut Self {
-        self.inner.append(append);
+        self.append = append;
         self
     }
 
     /// Sets truncate-on-open behavior.
     pub fn truncate(&mut self, truncate: bool) -> &mut Self {
-        self.inner.truncate(truncate);
+        self.truncate = truncate;
         self
     }
 
     /// Sets create-if-missing behavior.
     pub fn create(&mut self, create: bool) -> &mut Self {
-        self.inner.create(create);
+        self.create = create;
         self
     }
 
     /// Sets create-new behavior.
     pub fn create_new(&mut self, create_new: bool) -> &mut Self {
-        self.inner.create_new(create_new);
+        self.create_new = create_new;
         self
     }
 
     /// Sets the allocator used by reads on files opened with these options.
     pub fn allocator<B: Allocator>(&self, allocator: B) -> OpenOptions<B> {
         OpenOptions {
-            inner: self.inner.clone(),
+            read: self.read,
+            write: self.write,
+            append: self.append,
+            truncate: self.truncate,
+            create: self.create,
+            create_new: self.create_new,
             allocator,
         }
     }
 
     /// Opens a file with the configured options.
     pub async fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File<A>> {
-        let path = path.as_ref().to_path_buf();
-        let options = self.inner.clone();
+        let mut options = ::tokio::fs::OpenOptions::new();
+        options
+            .read(self.read)
+            .write(self.write)
+            .append(self.append)
+            .truncate(self.truncate)
+            .create(self.create)
+            .create_new(self.create_new);
         let allocator = self.allocator.clone();
-        ::tokio::task::spawn_blocking(move || {
-            options.open(path).map(|inner| File { inner, allocator })
-        })
-        .await
-        .map_err(io::Error::other)?
+        options
+            .open(path)
+            .await
+            .map(|inner| File { inner, allocator })
     }
 }
 
@@ -613,9 +620,9 @@ mod tests {
         std::fs::write(&path, b"clone me").unwrap();
         let file = File::open(&path).await.unwrap();
 
-        let cloned = file.try_clone().unwrap();
+        let cloned = file.try_clone().await.unwrap();
 
-        assert_eq!(file.metadata().unwrap().len(), 8);
+        assert_eq!(file.metadata().await.unwrap().len(), 8);
         assert_eq!(cloned.read_all().await.unwrap().as_ref(), b"clone me");
     }
 

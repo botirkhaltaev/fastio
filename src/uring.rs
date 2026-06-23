@@ -1,13 +1,16 @@
 //! Linux `io_uring` file I/O.
 //!
-//! This module mirrors `std::fs` where possible and adds positioned I/O backed
-//! by a thread-local `io_uring` instance.
+//! This module mirrors `std::fs` where behavior matches. Cursor-based
+//! [`Read`], [`Write`], and [`Seek`] operations and explicit positioned methods
+//! are backed by a thread-local `io_uring` instance. Append mode is not
+//! supported; use explicit offsets for writes that must target a known position.
 
 use std::cell::RefCell;
 use std::fs::{Metadata, Permissions};
 use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use io_uring::{IoUring, opcode, types};
 
@@ -53,6 +56,7 @@ pub struct File<A = DefaultAllocator> {
     inner: std::fs::File,
     ring_depth: u32,
     chunk_size: usize,
+    position: Arc<Mutex<u64>>,
     allocator: A,
 }
 
@@ -90,6 +94,7 @@ impl<A: Allocator> File<A> {
             inner: self.inner.try_clone()?,
             ring_depth: self.ring_depth,
             chunk_size: self.chunk_size,
+            position: Arc::clone(&self.position),
             allocator: self.allocator.clone(),
         })
     }
@@ -272,6 +277,37 @@ impl<A: Allocator> File<A> {
         })
     }
 
+    fn submit_read_at(
+        &self,
+        file: &std::fs::File,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let len = buf.len().min(MAX_IO_LEN) as u32;
+        with_ring(self.ring_depth, |ring| {
+            let entry = opcode::Read::new(types::Fd(file.as_raw_fd()), buf.as_mut_ptr(), len)
+                .offset(offset)
+                .build();
+            {
+                let mut sq = ring.submission();
+                unsafe { sq.push(&entry) }.map_err(|_| Error::other("io_uring SQ full"))?;
+            }
+            ring.submit_and_wait(1)?;
+            let cqe = ring
+                .completion()
+                .next()
+                .ok_or_else(|| Error::other("io_uring read completed without CQE"))?;
+            let result = cqe.result();
+            if result < 0 {
+                return Err(Error::from_raw_os_error(-result));
+            }
+            Ok(result as usize)
+        })
+    }
+
     fn submit_write_exact_at(
         &self,
         file: &std::fs::File,
@@ -373,6 +409,32 @@ impl<A: Allocator> File<A> {
         })
     }
 
+    fn submit_write_at(&self, file: &std::fs::File, offset: u64, data: &[u8]) -> io::Result<usize> {
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let len = data.len().min(MAX_IO_LEN) as u32;
+        with_ring(self.ring_depth, |ring| {
+            let entry = opcode::Write::new(types::Fd(file.as_raw_fd()), data.as_ptr(), len)
+                .offset(offset)
+                .build();
+            {
+                let mut sq = ring.submission();
+                unsafe { sq.push(&entry) }.map_err(|_| Error::other("io_uring SQ full"))?;
+            }
+            ring.submit_and_wait(1)?;
+            let cqe = ring
+                .completion()
+                .next()
+                .ok_or_else(|| Error::other("io_uring write completed without CQE"))?;
+            let result = cqe.result();
+            if result < 0 {
+                return Err(Error::from_raw_os_error(-result));
+            }
+            Ok(result as usize)
+        })
+    }
+
     fn submit_write_slices_at(
         &self,
         file: &std::fs::File,
@@ -466,15 +528,34 @@ impl<A: Allocator> File<A> {
     }
 }
 
-impl<A> Read for File<A> {
+impl<A: Allocator> Read for File<A> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.inner.read(buf)
+        let mut position = self
+            .position
+            .lock()
+            .map_err(|_| Error::other("file position lock poisoned"))?;
+        let n = self.submit_read_at(&self.inner, *position, buf)?;
+        *position = position
+            .checked_add(n as u64)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "file position overflow"))?;
+        Ok(n)
     }
 }
 
-impl<A> Write for File<A> {
+impl<A: Allocator> Write for File<A> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.inner.write(buf)
+        let mut position = self
+            .position
+            .lock()
+            .map_err(|_| Error::other("file position lock poisoned"))?;
+        let n = self.submit_write_at(&self.inner, *position, buf)?;
+        if n == 0 && !buf.is_empty() {
+            return Err(Error::new(ErrorKind::WriteZero, "short io_uring write"));
+        }
+        *position = position
+            .checked_add(n as u64)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "file position overflow"))?;
+        Ok(n)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -484,7 +565,29 @@ impl<A> Write for File<A> {
 
 impl<A> Seek for File<A> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        self.inner.seek(pos)
+        let mut position = self
+            .position
+            .lock()
+            .map_err(|_| Error::other("file position lock poisoned"))?;
+        let base = match pos {
+            SeekFrom::Start(offset) => {
+                *position = offset;
+                return Ok(offset);
+            }
+            SeekFrom::Current(_) => i128::from(*position),
+            SeekFrom::End(_) => i128::from(self.inner.metadata()?.len()),
+        };
+        let delta = match pos {
+            SeekFrom::Current(delta) | SeekFrom::End(delta) => i128::from(delta),
+            SeekFrom::Start(_) => unreachable!(),
+        };
+        let next = base
+            .checked_add(delta)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "file position overflow"))?;
+        let next = u64::try_from(next)
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid negative file position"))?;
+        *position = next;
+        Ok(next)
     }
 }
 
@@ -500,6 +603,7 @@ pub struct OpenOptions<A = DefaultAllocator> {
     inner: std::fs::OpenOptions,
     ring_depth: u32,
     chunk_size: usize,
+    append: bool,
     allocator: A,
 }
 
@@ -511,6 +615,7 @@ impl OpenOptions<DefaultAllocator> {
             inner: std::fs::OpenOptions::new(),
             ring_depth: DEFAULT_RING_DEPTH,
             chunk_size: DEFAULT_CHUNK_SIZE,
+            append: false,
             allocator: DefaultAllocator::default(),
         }
     }
@@ -532,6 +637,7 @@ impl<A: Allocator> OpenOptions<A> {
     /// Sets append mode.
     pub fn append(&mut self, append: bool) -> &mut Self {
         self.inner.append(append);
+        self.append = append;
         self
     }
 
@@ -571,6 +677,7 @@ impl<A: Allocator> OpenOptions<A> {
             inner: self.inner.clone(),
             ring_depth: self.ring_depth,
             chunk_size: self.chunk_size,
+            append: self.append,
             allocator,
         }
     }
@@ -589,10 +696,17 @@ impl<A: Allocator> OpenOptions<A> {
                 "chunk_size must be greater than zero",
             ));
         }
+        if self.append {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "uring append mode is not supported; use explicit offsets",
+            ));
+        }
         Ok(File {
             inner: self.inner.open(path)?,
             ring_depth: self.ring_depth,
             chunk_size: self.chunk_size,
+            position: Arc::new(Mutex::new(0)),
             allocator: self.allocator.clone(),
         })
     }
@@ -739,5 +853,114 @@ mod tests {
 
         assert_eq!(depth_err.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(chunk_err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn read_trait_uses_cursor_and_advances() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("read-trait.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let mut file = File::open(&path).unwrap();
+        let mut first = [0u8; 2];
+        let mut second = [0u8; 3];
+
+        let Some(n_first) = allow_unavailable(file.read(&mut first)) else {
+            return;
+        };
+        let Some(n_second) = allow_unavailable(file.read(&mut second)) else {
+            return;
+        };
+
+        assert_eq!(n_first, 2);
+        assert_eq!(first, *b"ab");
+        assert_eq!(n_second, 3);
+        assert_eq!(second, *b"cde");
+    }
+
+    #[test]
+    fn write_trait_uses_cursor_and_advances() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("write-trait.bin");
+        std::fs::write(&path, b"------").unwrap();
+        let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+
+        let Some(n_first) = allow_unavailable(file.write(b"ab")) else {
+            return;
+        };
+        let Some(n_second) = allow_unavailable(file.write(b"cd")) else {
+            return;
+        };
+
+        assert_eq!(n_first, 2);
+        assert_eq!(n_second, 2);
+        assert_eq!(std::fs::read(&path).unwrap(), b"abcd--");
+    }
+
+    #[test]
+    fn seek_trait_controls_read_position() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("seek-trait.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let mut file = File::open(&path).unwrap();
+        let mut buf = [0u8; 2];
+
+        assert_eq!(file.seek(SeekFrom::Start(3)).unwrap(), 3);
+        let Some(n) = allow_unavailable(file.read(&mut buf)) else {
+            return;
+        };
+
+        assert_eq!(n, 2);
+        assert_eq!(buf, *b"de");
+    }
+
+    #[test]
+    fn try_clone_shares_cursor() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("clone-cursor.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let mut file = File::open(&path).unwrap();
+        let mut cloned = file.try_clone().unwrap();
+        let mut first = [0u8; 2];
+        let mut second = [0u8; 2];
+
+        let Some(_) = allow_unavailable(file.read(&mut first)) else {
+            return;
+        };
+        let Some(_) = allow_unavailable(cloned.read(&mut second)) else {
+            return;
+        };
+
+        assert_eq!(first, *b"ab");
+        assert_eq!(second, *b"cd");
+    }
+
+    #[test]
+    fn positioned_reads_do_not_move_cursor() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("positioned-cursor.bin");
+        std::fs::write(&path, b"abcdef").unwrap();
+        let mut file = File::open(&path).unwrap();
+        let mut cursor_bytes = [0u8; 2];
+
+        let Some(bytes) = allow_unavailable(file.read_at(3, 2)) else {
+            return;
+        };
+        let Some(_) = allow_unavailable(file.read(&mut cursor_bytes)) else {
+            return;
+        };
+
+        assert_eq!(bytes.as_ref(), b"de");
+        assert_eq!(cursor_bytes, *b"ab");
+    }
+
+    #[test]
+    fn append_mode_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("append.bin");
+        std::fs::write(&path, b"existing").unwrap();
+
+        let err = OpenOptions::new().append(true).open(&path).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
     }
 }
