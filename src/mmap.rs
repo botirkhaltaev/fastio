@@ -31,14 +31,14 @@ impl File {
     /// Returns a reference to the underlying `std::fs::File`.
     #[inline]
     #[must_use]
-    pub const fn as_std(&self) -> &StdFile {
+    pub const fn get_ref(&self) -> &StdFile {
         &self.inner
     }
 
     /// Consumes this handle, returning the underlying `std::fs::File`.
     #[inline]
     #[must_use]
-    pub fn into_std(self) -> StdFile {
+    pub fn into_inner(self) -> StdFile {
         self.inner
     }
 

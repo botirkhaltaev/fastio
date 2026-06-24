@@ -45,14 +45,14 @@ impl<A> File<A> {
     /// Returns a reference to the underlying `std::fs::File`.
     #[inline]
     #[must_use]
-    pub const fn as_std(&self) -> &std::fs::File {
+    pub const fn get_ref(&self) -> &std::fs::File {
         &self.inner
     }
 
     /// Consumes this handle, returning the underlying `std::fs::File`.
     #[inline]
     #[must_use]
-    pub fn into_std(self) -> std::fs::File {
+    pub fn into_inner(self) -> std::fs::File {
         self.inner
     }
 }
