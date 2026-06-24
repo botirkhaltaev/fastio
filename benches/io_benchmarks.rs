@@ -861,9 +861,96 @@ fn bench_cursor_write(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// 11. read_at_batch — batched positioned reads (io_uring, unix only)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+const BATCH_SIZES: &[usize] = &[4, 16, 64, 256];
+#[cfg(unix)]
+const BATCH_READ_LEN: usize = 4096;
+
+#[cfg(unix)]
+fn bench_read_at_batch(c: &mut Criterion) {
+    let fixture = Fixture::new();
+    // Use a 16 MiB file so all batch reads fit
+    let file_size = 16 * 1024 * 1024u64;
+    let path = fixture.create_file("batch_read.bin", file_size);
+
+    for &batch_size in BATCH_SIZES {
+        let total_bytes = batch_size * BATCH_READ_LEN;
+        let regions: Vec<(u64, usize)> = (0..batch_size)
+            .map(|i| (i as u64 * BATCH_READ_LEN as u64, BATCH_READ_LEN))
+            .collect();
+        let mut group = c.benchmark_group(format!("read_at_batch/n={batch_size}"));
+        group.throughput(Throughput::Bytes(total_bytes as u64));
+
+        // --- baseline: N sequential pread calls ---
+        #[cfg(unix)]
+        group.bench_function(BenchmarkId::new("sequential_pread", batch_size), |b| {
+            let file = std::fs::File::open(&path).unwrap();
+            let mut buf = vec![0u8; BATCH_READ_LEN];
+            b.iter(|| {
+                for &(offset, _len) in &regions {
+                    file.read_exact_at(&mut buf, offset).unwrap();
+                }
+                black_box(buf.len());
+            });
+        });
+
+        // --- fastio::uring::File::read_at_batch ---
+        #[cfg(all(target_os = "linux", feature = "io-uring"))]
+        if uring_available() {
+            group.bench_function(BenchmarkId::new("fastio_uring_batch", batch_size), |b| {
+                let file = fastio::uring::File::open(&path).unwrap();
+                b.iter(|| {
+                    let results = file.read_at_batch(&regions).unwrap();
+                    black_box(results.len());
+                });
+            });
+        }
+
+        // --- fastio::uring single reads for comparison ---
+        #[cfg(all(target_os = "linux", feature = "io-uring"))]
+        if uring_available() {
+            group.bench_function(
+                BenchmarkId::new("fastio_uring_sequential", batch_size),
+                |b| {
+                    let file = fastio::uring::File::open(&path).unwrap();
+                    b.iter(|| {
+                        for &(offset, len) in &regions {
+                            let bytes = file.read_at(offset, len).unwrap();
+                            black_box(bytes.len());
+                        }
+                    });
+                },
+            );
+        }
+
+        group.finish();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Criterion harness
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
+criterion_group!(
+    benches,
+    bench_read_all,
+    bench_read_at,
+    bench_write_all_at,
+    bench_write_slices,
+    bench_allocator,
+    bench_mmap,
+    bench_async_read,
+    bench_async_write,
+    bench_cursor_read,
+    bench_cursor_write,
+    bench_read_at_batch,
+);
+
+#[cfg(not(unix))]
 criterion_group!(
     benches,
     bench_read_all,
@@ -877,4 +964,5 @@ criterion_group!(
     bench_cursor_read,
     bench_cursor_write,
 );
+
 criterion_main!(benches);

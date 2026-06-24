@@ -1,7 +1,7 @@
 //! Tokio async file I/O.
 //!
-//! This module mirrors `tokio::fs` where behavior matches, while adding async
-//! positioned I/O methods for large-file workloads.
+//! This module wraps `std::fs::File` and runs all operations via
+//! `tokio::task::spawn_blocking`, keeping the Tokio runtime threads free.
 
 use std::fs::{Metadata, Permissions};
 use std::io;
@@ -15,9 +15,13 @@ use crate::{Allocator, DefaultAllocator, IoResult, OwnedBytes, WriteSlices};
 compile_error!("fastio tokio supports Linux, macOS, and Windows only");
 
 /// A Tokio-backed file handle.
+///
+/// All I/O is dispatched to the blocking thread pool via
+/// [`tokio::task::spawn_blocking`]. Each blocking call receives its own
+/// OS-level file handle via `try_clone` (a cheap kernel `dup`).
 #[derive(Debug)]
 pub struct File<A = DefaultAllocator> {
-    inner: ::tokio::fs::File,
+    inner: std::fs::File,
     allocator: A,
 }
 
@@ -53,43 +57,75 @@ impl File<DefaultAllocator> {
     }
 }
 
+impl<A> File<A> {
+    /// Returns a reference to the underlying `std::fs::File`.
+    #[inline]
+    #[must_use]
+    pub const fn get_ref(&self) -> &std::fs::File {
+        &self.inner
+    }
+
+    /// Consumes this handle, returning the underlying `std::fs::File`.
+    #[inline]
+    #[must_use]
+    pub fn into_inner(self) -> std::fs::File {
+        self.inner
+    }
+}
+
 impl<A: Allocator> File<A> {
-    /// Creates a new `File` instance sharing the same underlying handle.
+    /// Creates a new `File` instance sharing the same underlying OS handle.
     pub async fn try_clone(&self) -> io::Result<Self> {
+        let dup = self.inner.try_clone()?;
         Ok(Self {
-            inner: self.inner.try_clone().await?,
+            inner: dup,
             allocator: self.allocator.clone(),
         })
     }
 
     /// Queries metadata about the underlying file.
     pub async fn metadata(&self) -> io::Result<Metadata> {
-        self.inner.metadata().await
+        let file = self.inner.try_clone()?;
+        ::tokio::task::spawn_blocking(move || file.metadata())
+            .await
+            .map_err(io::Error::other)?
     }
 
     /// Truncates or extends the underlying file.
     pub async fn set_len(&self, size: u64) -> io::Result<()> {
-        self.inner.set_len(size).await
+        let file = self.inner.try_clone()?;
+        ::tokio::task::spawn_blocking(move || file.set_len(size))
+            .await
+            .map_err(io::Error::other)?
     }
 
     /// Attempts to sync all OS-internal file content and metadata to disk.
     pub async fn sync_all(&self) -> io::Result<()> {
-        self.inner.sync_all().await
+        let file = self.inner.try_clone()?;
+        ::tokio::task::spawn_blocking(move || file.sync_all())
+            .await
+            .map_err(io::Error::other)?
     }
 
     /// Attempts to sync file content to disk.
     pub async fn sync_data(&self) -> io::Result<()> {
-        self.inner.sync_data().await
+        let file = self.inner.try_clone()?;
+        ::tokio::task::spawn_blocking(move || file.sync_data())
+            .await
+            .map_err(io::Error::other)?
     }
 
     /// Changes permissions on the underlying file.
     pub async fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
-        self.inner.set_permissions(perm).await
+        let file = self.inner.try_clone()?;
+        ::tokio::task::spawn_blocking(move || file.set_permissions(perm))
+            .await
+            .map_err(io::Error::other)?
     }
 
     /// Reads the whole file into memory from offset 0.
     pub async fn read_all(&self) -> io::Result<OwnedBytes> {
-        let file = self.inner.try_clone().await?.into_std().await;
+        let file = self.inner.try_clone()?;
         let allocator = self.allocator.clone();
         ::tokio::task::spawn_blocking(move || {
             let len = usize::try_from(file.metadata()?.len())
@@ -116,7 +152,7 @@ impl<A: Allocator> File<A> {
         if len == 0 {
             return Ok(OwnedBytes::Vec(Vec::new()));
         }
-        let file = self.inner.try_clone().await?.into_std().await;
+        let file = self.inner.try_clone()?;
         let allocator = self.allocator.clone();
         ::tokio::task::spawn_blocking(move || {
             let mut bytes = allocator.allocate(len);
@@ -138,7 +174,7 @@ impl<A: Allocator> File<A> {
         if buf.is_empty() {
             return Ok(());
         }
-        let file = self.inner.try_clone().await?.into_std().await;
+        let file = self.inner.try_clone()?;
         let len = buf.len();
         let bytes = ::tokio::task::spawn_blocking(move || {
             let mut bytes = vec![0u8; len];
@@ -156,7 +192,7 @@ impl<A: Allocator> File<A> {
         if buf.is_empty() {
             return Ok(());
         }
-        let file = self.inner.try_clone().await?.into_std().await;
+        let file = self.inner.try_clone()?;
         let bytes = buf.to_vec();
         ::tokio::task::spawn_blocking(move || Self::write_at_positioned(&file, offset, &bytes))
             .await
@@ -165,36 +201,15 @@ impl<A: Allocator> File<A> {
 
     /// Writes non-overlapping slices at their offsets.
     pub async fn write_slices_at(&self, writes: WriteSlices<'_, '_>) -> io::Result<()> {
-        let file = self.inner.try_clone().await?.into_std().await;
-        let writes = writes
+        let file = self.inner.try_clone()?;
+        let owned: Vec<(u64, Vec<u8>)> = writes
             .as_slice()
             .iter()
             .map(|w| (w.offset, w.data.to_vec()))
-            .collect::<Vec<_>>();
+            .collect();
         ::tokio::task::spawn_blocking(move || {
-            if writes.is_empty() {
-                return Ok(());
-            }
-            let workers = std::thread::available_parallelism()
-                .map(usize::from)
-                .unwrap_or(1)
-                .min(writes.len())
-                .max(1);
-            for batch in writes.chunks(workers) {
-                std::thread::scope(|scope| {
-                    let handles = batch
-                        .iter()
-                        .map(|(offset, data)| {
-                            scope.spawn(|| Self::write_at_positioned(&file, *offset, data))
-                        })
-                        .collect::<Vec<_>>();
-                    for handle in handles {
-                        handle
-                            .join()
-                            .map_err(|_| io::Error::other("positioned write worker panicked"))??;
-                    }
-                    Ok::<_, io::Error>(())
-                })?;
+            for (offset, data) in &owned {
+                Self::write_at_positioned(&file, *offset, data)?;
             }
             Ok(())
         })
@@ -202,8 +217,8 @@ impl<A: Allocator> File<A> {
         .map_err(io::Error::other)?
     }
 
-    /// Positioned read that doesn't require a seek.
     #[cfg(unix)]
+    #[inline]
     fn read_at_positioned(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> IoResult<()> {
         use std::os::unix::fs::FileExt;
         file.read_exact_at(buf, offset)
@@ -234,8 +249,8 @@ impl<A: Allocator> File<A> {
         result.and(restore.map(|_| ()))
     }
 
-    /// Positioned write that doesn't require a seek.
     #[cfg(unix)]
+    #[inline]
     fn write_at_positioned(file: &std::fs::File, offset: u64, data: &[u8]) -> IoResult<()> {
         use std::os::unix::fs::FileExt;
         file.write_all_at(data, offset)
@@ -264,12 +279,6 @@ impl<A: Allocator> File<A> {
         }
         let restore = handle.seek(std::io::SeekFrom::Start(original_position));
         result.and(restore.map(|_| ()))
-    }
-}
-
-impl<A> AsRef<::tokio::fs::File> for File<A> {
-    fn as_ref(&self) -> &::tokio::fs::File {
-        &self.inner
     }
 }
 
@@ -303,37 +312,43 @@ impl OpenOptions<DefaultAllocator> {
 
 impl<A: Allocator> OpenOptions<A> {
     /// Sets read access.
-    pub fn read(&mut self, read: bool) -> &mut Self {
+    #[inline]
+    pub const fn read(&mut self, read: bool) -> &mut Self {
         self.read = read;
         self
     }
 
     /// Sets write access.
-    pub fn write(&mut self, write: bool) -> &mut Self {
+    #[inline]
+    pub const fn write(&mut self, write: bool) -> &mut Self {
         self.write = write;
         self
     }
 
     /// Sets append mode.
-    pub fn append(&mut self, append: bool) -> &mut Self {
+    #[inline]
+    pub const fn append(&mut self, append: bool) -> &mut Self {
         self.append = append;
         self
     }
 
     /// Sets truncate-on-open behavior.
-    pub fn truncate(&mut self, truncate: bool) -> &mut Self {
+    #[inline]
+    pub const fn truncate(&mut self, truncate: bool) -> &mut Self {
         self.truncate = truncate;
         self
     }
 
     /// Sets create-if-missing behavior.
-    pub fn create(&mut self, create: bool) -> &mut Self {
+    #[inline]
+    pub const fn create(&mut self, create: bool) -> &mut Self {
         self.create = create;
         self
     }
 
     /// Sets create-new behavior.
-    pub fn create_new(&mut self, create_new: bool) -> &mut Self {
+    #[inline]
+    pub const fn create_new(&mut self, create_new: bool) -> &mut Self {
         self.create_new = create_new;
         self
     }
@@ -353,19 +368,19 @@ impl<A: Allocator> OpenOptions<A> {
 
     /// Opens a file with the configured options.
     pub async fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File<A>> {
-        let mut options = ::tokio::fs::OpenOptions::new();
-        options
-            .read(self.read)
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(self.read)
             .write(self.write)
             .append(self.append)
             .truncate(self.truncate)
             .create(self.create)
             .create_new(self.create_new);
         let allocator = self.allocator.clone();
-        options
-            .open(path)
+        let path = path.as_ref().to_owned();
+        let inner = ::tokio::task::spawn_blocking(move || opts.open(path))
             .await
-            .map(|inner| File { inner, allocator })
+            .map_err(io::Error::other)??;
+        Ok(File { inner, allocator })
     }
 }
 

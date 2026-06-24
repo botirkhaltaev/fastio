@@ -20,7 +20,7 @@ io-uring = ["dep:io-uring", "dep:libc"]
 [dependencies]
 memmap2 = { version = "0.9", optional = true }
 region = { version = "3.0.2", optional = true }
-tokio = { version = "1", optional = true, features = ["rt", "rt-multi-thread", "fs", "macros", "io-util"] }
+tokio = { version = "1", optional = true, features = ["rt", "rt-multi-thread"] }
 zeropool = { version = "0.3.1", default-features = false, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -35,5 +35,10 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "fs", "macros", "i
 
 [[bench]]
 name = "io_benchmarks"
+harness = false
+required-features = ["sync", "mmap", "pool", "tokio", "io-uring"]
+
+[[bench]]
+name = "profile_targets"
 harness = false
 required-features = ["sync", "mmap", "pool", "tokio", "io-uring"]

@@ -93,7 +93,7 @@ impl std::ops::Deref for MmapRegion {
 /// Implementors must return an [`OwnedBytes`] variant with a mutable slice of
 /// exactly `len` bytes.
 pub trait Allocator: Clone + Send + Sync + std::fmt::Debug + 'static {
-    /// Allocate a zeroed buffer of `len` bytes.
+    /// Allocate a mutable buffer of `len` bytes.
     fn allocate(&self, len: usize) -> OwnedBytes;
 }
 
@@ -172,14 +172,14 @@ impl OwnedBytes {
     #[cfg(feature = "pool")]
     #[inline]
     #[must_use]
-    pub fn from_pooled(buf: PooledBuffer) -> Self {
+    pub const fn from_pooled(buf: PooledBuffer) -> Self {
         Self::Pooled(buf)
     }
 
     /// Wrap a plain `Vec<u8>`.
     #[inline]
     #[must_use]
-    pub fn from_vec(v: Vec<u8>) -> Self {
+    pub const fn from_vec(v: Vec<u8>) -> Self {
         Self::Vec(v)
     }
 

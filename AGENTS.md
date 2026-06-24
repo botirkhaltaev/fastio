@@ -22,7 +22,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 - Do not add a root default `File`, root `OpenOptions`, production free functions, backend free functions, or compatibility shims; users must opt into a concrete backend file type.
 - Treat internal APIs with the same bar as public APIs. Internal functions and types must be clean, composable, general, and purposeful; do not create helper-only wrappers just to shorten a call site.
 - Do not reintroduce a public availability API or backend identity trait. Platform and runtime failures should be returned by the I/O operation.
-- Keep `tokio` independent from Rayon. Tokio positioned operations must not block runtime worker threads directly; move blocking work into `spawn_blocking` with owned data.
+- The `tokio` backend does not use `tokio::fs`. It holds a `std::fs::File` and dispatches all I/O via `spawn_blocking` with `try_clone`d handles. Do not reintroduce `tokio::fs` usage.
+- Keep `tokio` independent from Rayon. Tokio operations must not block runtime worker threads directly; move blocking work into `spawn_blocking` with owned data.
 - Do not add Rayon unless there is a measured backend-specific need.
 - Gate optional storage types and APIs with their features (`mmap`, `pool`, `tokio`, `io-uring`).
 - Reads must allocate through the configured `Allocator`. With `pool` enabled, default reads should return pooled buffers; direct `Vec` allocation in read paths is a regression unless the caller explicitly chose `System` or the read is zero-length.

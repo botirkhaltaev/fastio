@@ -5,7 +5,7 @@
 - `write.rs`: positioned write slices and validated write batches.
 - `buffer.rs`: owned byte buffers plus the `Allocator` trait, `Pool`, and `System`.
 - `sync/`: `std::fs`-like synchronous backend.
-- `tokio/`: `tokio::fs`-like async backend.
+- `tokio/`: async backend using `Arc<std::fs::File>` + `spawn_blocking`.
 - `mmap.rs`: read-only memory mapping file backend.
 - `uring.rs`: Linux `io_uring` file backend and ring implementation. Cursor traits and positioned methods use the ring; append mode is unsupported.
 
