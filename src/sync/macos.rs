@@ -62,33 +62,11 @@ impl File {
     pub fn read_all(&self) -> io::Result<Bytes> {
         let len = usize::try_from(self.inner.metadata()?.len())
             .map_err(|_| io::Error::other("file too large"))?;
-        if len == 0 {
-            return Ok(Bytes::Vec(Vec::new()));
-        }
-        let mut bytes = Bytes::allocate(len);
-        let buf = bytes
-            .as_mut_slice()
-            .ok_or_else(|| io::Error::other("allocator returned immutable buffer"))?;
-        if buf.len() != len {
-            return Err(io::Error::other("allocator returned wrong-sized buffer"));
-        }
-        self.read_exact_at(0, buf)?;
-        Ok(bytes)
+        Bytes::allocate(len, |buf| self.read_exact_at(0, buf))
     }
 
     pub fn read_at(&self, offset: u64, len: usize) -> io::Result<Bytes> {
-        if len == 0 {
-            return Ok(Bytes::Vec(Vec::new()));
-        }
-        let mut bytes = Bytes::allocate(len);
-        let buf = bytes
-            .as_mut_slice()
-            .ok_or_else(|| io::Error::other("allocator returned immutable buffer"))?;
-        if buf.len() != len {
-            return Err(io::Error::other("allocator returned wrong-sized buffer"));
-        }
-        self.read_exact_at(offset, buf)?;
-        Ok(bytes)
+        Bytes::allocate(len, |buf| self.read_exact_at(offset, buf))
     }
 
     pub fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {

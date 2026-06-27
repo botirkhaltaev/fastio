@@ -1,17 +1,21 @@
 //! Owned byte buffer types for storage I/O.
 //!
-//! [`Bytes`] is a zero-copy owned byte container that can be backed by a pooled,
+//! [`Bytes`] is a zero-copy owned byte container backed by a pooled,
 //! memory-mapped, or plain `Vec` storage. All variants provide uniform read
 //! access via `AsRef<[u8]>` and `Deref<Target = [u8]>`.
 //!
-//! Read-capable backends allocate through the internal crate-only `Bytes::allocate`
-//! path, which reuses buffers from a process-wide pool.
+//! Read-capable backends allocate through the internal crate-only
+//! `Bytes::allocate` path. It uses `zeropool::ZeroPool::alloc_uninit` to avoid
+//! paying a zeroing cost, and hands the caller a mutable slice to fill. The
+//! caller is responsible for fully initializing the buffer inside the closure;
+//! once the closure succeeds, the returned `Bytes` is considered initialized.
 //! Zero-length reads return an empty `Bytes::Vec` without touching the pool.
 
+use std::fmt;
 use std::sync::Arc;
 
 #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
-use zeropool::BufferPool;
+use zeropool::ZeroPool;
 
 // ============================================================================
 // MmapRegion — Arc-backed memory-mapped file region
@@ -85,48 +89,83 @@ impl std::ops::Deref for MmapRegion {
 
 /// Owned byte buffer backed by one of several storage strategies.
 ///
-/// All variants provide uniform read access via `AsRef<[u8]>` / `Deref`.
-/// Only the `Pooled` and `Vec` variants support mutable access.
-pub enum Bytes {
-    /// A buffer returned from the internal process-wide pool.
-    Pooled(zeropool::PooledBuffer),
-    /// A memory-mapped file region (zero-copy, read-only).
+/// `Bytes` provides uniform read access via `AsRef<[u8]>` / `Deref`.
+/// Only heap-backed and pooled storage support mutable access.
+pub struct Bytes {
+    inner: Storage,
+}
+
+#[derive(Debug)]
+enum Storage {
+    #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
+    Pooled(zeropool::Buf<'static>),
     #[cfg(feature = "mmap")]
-    Mmap(crate::mmap::MmapRegion),
-    /// A plain heap-allocated buffer.
+    Mmap(MmapRegion),
     Vec(Vec<u8>),
 }
 
 impl Bytes {
-    /// Allocate a buffer for a read of `len` bytes.
+    /// Allocate a buffer for a read of `len` bytes and fill it via `init`.
     ///
-    /// The returned buffer is not initialized; the caller must fill it through
-    /// `as_mut_slice` before exposing it to consumers.
+    /// The closure receives a mutable byte slice of length `len`. The slice is
+    /// backed by an uninitialized pooled buffer; the closure must fully
+    /// initialize every byte before returning. On success, the now-initialized
+    /// buffer is wrapped in a `Bytes`. On failure, the uninitialized buffer is
+    /// returned to the pool and the error is propagated.
     #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
-    #[inline]
-    pub(crate) fn allocate(len: usize) -> Self {
+    pub(crate) fn allocate(
+        len: usize,
+        init: impl FnOnce(&mut [u8]) -> crate::IoResult<()>,
+    ) -> crate::IoResult<Self> {
         if len == 0 {
-            return Self::Vec(Vec::new());
+            return Ok(Self {
+                inner: Storage::Vec(Vec::new()),
+            });
         }
-        Self::Pooled(global_pool().get(len))
+        let mut uninit = global_pool().alloc_uninit(len);
+        let uninit_slice = uninit.as_uninit_mut();
+        // SAFETY: the closure is required to fully initialize every byte in the
+        // slice before returning. `Bytes` is not exposed to safe code until the
+        // closure succeeds, so no safe consumer can observe uninitialized bytes.
+        let init_slice =
+            unsafe { std::slice::from_raw_parts_mut(uninit_slice.as_mut_ptr().cast::<u8>(), len) };
+        init(init_slice)?;
+        // SAFETY: the closure has promised to initialize all bytes in `init_slice`.
+        let buf = unsafe { uninit.assume_init() };
+        Ok(Self {
+            inner: Storage::Pooled(buf),
+        })
     }
 
     /// Wrap a plain `Vec<u8>`.
     #[inline]
     #[must_use]
     pub fn from_vec(v: Vec<u8>) -> Self {
-        Self::Vec(v)
+        Self {
+            inner: Storage::Vec(v),
+        }
+    }
+
+    /// Wrap a memory-mapped region.
+    #[cfg(feature = "mmap")]
+    #[inline]
+    #[must_use]
+    pub fn from_mmap(region: MmapRegion) -> Self {
+        Self {
+            inner: Storage::Mmap(region),
+        }
     }
 
     /// Number of bytes.
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
-        match self {
-            Self::Pooled(b) => b.len(),
+        match &self.inner {
+            #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
+            Storage::Pooled(b) => b.len(),
             #[cfg(feature = "mmap")]
-            Self::Mmap(b) => b.len(),
-            Self::Vec(b) => b.len(),
+            Storage::Mmap(b) => b.len(),
+            Storage::Vec(b) => b.len(),
         }
     }
 
@@ -139,28 +178,30 @@ impl Bytes {
 
     /// Returns a mutable byte slice for the variants that own their memory.
     ///
-    /// Returns `None` for [`Bytes::Mmap`], which is immutable.
+    /// Returns `None` for memory-mapped storage, which is immutable.
     #[inline]
     #[must_use]
     pub fn as_mut_slice(&mut self) -> Option<&mut [u8]> {
-        match self {
-            Self::Pooled(b) => Some(b.as_mut_slice()),
+        match &mut self.inner {
+            #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
+            Storage::Pooled(b) => Some(b.as_mut()),
             #[cfg(feature = "mmap")]
-            Self::Mmap(_) => None,
-            Self::Vec(b) => Some(b.as_mut_slice()),
+            Storage::Mmap(_) => None,
+            Storage::Vec(b) => Some(b.as_mut_slice()),
         }
     }
 
     /// Convert to a `Vec<u8>`.
     ///
-    /// Copies when backed by `Mmap` storage to avoid mismatched-allocator UB.
+    /// Copies when backed by `Mmap` storage.
     #[must_use]
     pub fn into_vec(self) -> Vec<u8> {
-        match self {
-            Self::Pooled(b) => b.into_inner(),
+        match self.inner {
+            #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
+            Storage::Pooled(b) => b.into_inner(),
             #[cfg(feature = "mmap")]
-            Self::Mmap(b) => b.as_slice().to_vec(),
-            Self::Vec(b) => b,
+            Storage::Mmap(b) => b.as_slice().to_vec(),
+            Storage::Vec(b) => b,
         }
     }
 
@@ -169,11 +210,12 @@ impl Bytes {
     /// Copies when backed by `Mmap` storage.
     #[must_use]
     pub fn into_shared(self) -> Arc<[u8]> {
-        match self {
-            Self::Pooled(b) => b.into_inner().into(),
+        match self.inner {
+            #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
+            Storage::Pooled(b) => b.into_inner().into(),
             #[cfg(feature = "mmap")]
-            Self::Mmap(b) => Arc::from(b.as_slice()),
-            Self::Vec(b) => b.into(),
+            Storage::Mmap(b) => Arc::from(b.as_slice()),
+            Storage::Vec(b) => b.into(),
         }
     }
 }
@@ -181,11 +223,12 @@ impl Bytes {
 impl AsRef<[u8]> for Bytes {
     #[inline]
     fn as_ref(&self) -> &[u8] {
-        match self {
-            Self::Pooled(b) => b.as_ref(),
+        match &self.inner {
+            #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
+            Storage::Pooled(b) => b.as_ref(),
             #[cfg(feature = "mmap")]
-            Self::Mmap(b) => b.as_slice(),
-            Self::Vec(b) => b.as_ref(),
+            Storage::Mmap(b) => b.as_slice(),
+            Storage::Vec(b) => b.as_ref(),
         }
     }
 }
@@ -199,8 +242,8 @@ impl std::ops::Deref for Bytes {
     }
 }
 
-impl std::fmt::Debug for Bytes {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Bytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Bytes")
             .field("len", &self.len())
             .finish_non_exhaustive()
@@ -210,21 +253,35 @@ impl std::fmt::Debug for Bytes {
 impl From<Vec<u8>> for Bytes {
     #[inline]
     fn from(v: Vec<u8>) -> Self {
-        Self::Vec(v)
+        Self::from_vec(v)
+    }
+}
+
+#[cfg(feature = "mmap")]
+impl From<MmapRegion> for Bytes {
+    #[inline]
+    fn from(region: MmapRegion) -> Self {
+        Self::from_mmap(region)
+    }
+}
+
+#[cfg(test)]
+#[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
+impl Bytes {
+    pub(crate) fn is_pooled(&self) -> bool {
+        matches!(self.inner, Storage::Pooled(_))
     }
 }
 
 #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
-fn global_pool() -> &'static BufferPool {
+fn global_pool() -> &'static ZeroPool {
     use std::sync::OnceLock;
-    static POOL: OnceLock<BufferPool> = OnceLock::new();
+    static POOL: OnceLock<ZeroPool> = OnceLock::new();
     POOL.get_or_init(|| {
-        BufferPool::builder()
-            .num_shards(8)
-            .tls_cache_size(4)
-            .max_buffers_per_shard(32)
+        ZeroPool::new()
             .min_buffer_size(1024 * 1024)
-            .build()
+            .tls_cache_size(4)
+            .max_buffers_per_class(32)
     })
 }
 
@@ -237,7 +294,7 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "mmap")]
-    fn make_mmap_region() -> crate::mmap::MmapRegion {
+    fn make_mmap_region() -> MmapRegion {
         use std::io::Write;
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         tmp.write_all(b"hello_mmap").unwrap();
@@ -246,7 +303,7 @@ mod tests {
         // SAFETY: the temp file remains alive for the duration of the mapping
         // setup, and memmap2 owns the resulting mapping independently.
         let mmap = unsafe { memmap2::MmapOptions::new().map(&file).unwrap() };
-        crate::mmap::MmapRegion::new(Arc::new(mmap), 0, 10)
+        MmapRegion::new(Arc::new(mmap), 0, 10)
     }
 
     #[test]
@@ -259,10 +316,13 @@ mod tests {
     #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
     #[test]
     fn allocate_pooled_roundtrips() {
-        let mut ob = Bytes::allocate(8);
-        let buf = ob.as_mut_slice().unwrap();
-        buf[..4].copy_from_slice(&[10, 20, 30, 40]);
+        let mut ob = Bytes::allocate(8, |buf| {
+            buf[..4].copy_from_slice(&[10, 20, 30, 40]);
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(&ob.as_ref()[..4], &[10, 20, 30, 40]);
+        assert!(ob.as_mut_slice().is_some());
     }
 
     #[test]
@@ -275,7 +335,7 @@ mod tests {
     #[cfg(feature = "mmap")]
     #[test]
     fn mmap_variant_accessible() {
-        let ob = Bytes::Mmap(make_mmap_region());
+        let ob = Bytes::from_mmap(make_mmap_region());
         assert_eq!(ob.as_ref(), b"hello_mmap");
     }
 
@@ -318,17 +378,10 @@ mod tests {
         assert_eq!(ob.as_ref()[0], 99);
     }
 
-    #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
-    #[test]
-    fn as_mut_slice_some_for_pooled() {
-        let mut ob = Bytes::allocate(4);
-        assert!(ob.as_mut_slice().is_some());
-    }
-
     #[cfg(feature = "mmap")]
     #[test]
     fn as_mut_slice_none_for_mmap() {
-        let mut ob = Bytes::Mmap(make_mmap_region());
+        let mut ob = Bytes::from_mmap(make_mmap_region());
         assert!(ob.as_mut_slice().is_none());
     }
 
@@ -356,7 +409,10 @@ mod tests {
         let data = vec![7u8, 8, 9];
         assert_eq!(Bytes::from_vec(data.clone()).into_vec(), data);
         #[cfg(feature = "mmap")]
-        assert_eq!(Bytes::Mmap(make_mmap_region()).into_vec(), b"hello_mmap");
+        assert_eq!(
+            Bytes::from_mmap(make_mmap_region()).into_vec(),
+            b"hello_mmap"
+        );
     }
 
     #[test]
@@ -365,7 +421,7 @@ mod tests {
         let shared = Bytes::from_vec(data.clone()).into_shared();
         assert_eq!(shared.as_ref(), &data[..]);
         #[cfg(feature = "mmap")]
-        let shared2 = Bytes::Mmap(make_mmap_region()).into_shared();
+        let shared2 = Bytes::from_mmap(make_mmap_region()).into_shared();
         #[cfg(feature = "mmap")]
         assert_eq!(shared2.as_ref(), b"hello_mmap");
     }
@@ -373,16 +429,27 @@ mod tests {
     #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
     #[test]
     fn allocate_returns_pooled_storage() {
-        let ob = Bytes::allocate(4);
-        assert!(matches!(ob, Bytes::Pooled(_)));
+        let ob = Bytes::allocate(4, |buf| {
+            buf.copy_from_slice(&[1, 2, 3, 4]);
+            Ok(())
+        })
+        .unwrap();
+        assert!(matches!(ob.inner, Storage::Pooled(_)));
         assert_eq!(ob.len(), 4);
     }
 
     #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
     #[test]
     fn zero_length_allocation_is_empty_vec() {
-        let ob = Bytes::allocate(0);
-        assert!(matches!(ob, Bytes::Vec(_)));
+        let ob = Bytes::allocate(0, |_| Ok(())).unwrap();
+        assert!(matches!(ob.inner, Storage::Vec(_)));
         assert!(ob.is_empty());
+    }
+
+    #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
+    #[test]
+    fn allocate_propagates_init_error() {
+        let err = Bytes::allocate(4, |_| Err(std::io::Error::other("boom"))).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
     }
 }

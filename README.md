@@ -10,12 +10,10 @@ Fast file I/O backends for Rust libraries and applications.
 - `tokio`: async I/O using Tokio, without a Rayon dependency.
 - `mmap`: read-only memory maps using `memmap2`.
 - `io-uring`: Linux-only `io_uring` backend. Cursor traits and positioned methods are ring-backed; append mode is intentionally unsupported.
-- `pool`: pooled read buffers using `zeropool`.
 
 Default features enable all supported backends for the current platform.
-Read methods reuse buffers from an internal process-wide pool and return
-`Bytes::Pooled`. Zero-length reads return an empty `Bytes::Vec` without touching
-`Bytes::allocate`.
+Read methods allocate through an internal process-wide pool and return `Bytes`.
+Zero-length reads return an empty buffer without touching the pool.
 
 ## Example
 

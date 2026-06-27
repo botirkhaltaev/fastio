@@ -89,18 +89,7 @@ impl File {
         ::tokio::task::spawn_blocking(move || {
             let len = usize::try_from(file.metadata()?.len())
                 .map_err(|_| io::Error::other("file too large"))?;
-            if len == 0 {
-                return Ok(Bytes::Vec(Vec::new()));
-            }
-            let mut bytes = Bytes::allocate(len);
-            let buf = bytes
-                .as_mut_slice()
-                .ok_or_else(|| io::Error::other("allocator returned immutable buffer"))?;
-            if buf.len() != len {
-                return Err(io::Error::other("allocator returned wrong-sized buffer"));
-            }
-            Self::read_at_positioned(&file, 0, buf)?;
-            Ok(bytes)
+            Bytes::allocate(len, |buf| Self::read_at_positioned(&file, 0, buf))
         })
         .await
         .map_err(io::Error::other)?
@@ -108,20 +97,9 @@ impl File {
 
     /// Reads `len` bytes at `offset` into a new buffer.
     pub async fn read_at(&self, offset: u64, len: usize) -> io::Result<Bytes> {
-        if len == 0 {
-            return Ok(Bytes::Vec(Vec::new()));
-        }
         let file = self.inner.try_clone().await?.into_std().await;
         ::tokio::task::spawn_blocking(move || {
-            let mut bytes = Bytes::allocate(len);
-            let buf = bytes
-                .as_mut_slice()
-                .ok_or_else(|| io::Error::other("allocator returned immutable buffer"))?;
-            if buf.len() != len {
-                return Err(io::Error::other("allocator returned wrong-sized buffer"));
-            }
-            Self::read_at_positioned(&file, offset, buf)?;
-            Ok(bytes)
+            Bytes::allocate(len, |buf| Self::read_at_positioned(&file, offset, buf))
         })
         .await
         .map_err(io::Error::other)?
@@ -351,7 +329,6 @@ impl Default for OpenOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Bytes;
     use tempfile::TempDir;
 
     #[tokio::test(flavor = "multi_thread")]
@@ -394,7 +371,7 @@ mod tests {
         let file = File::open(&path).await.unwrap();
         let result = file.read_all().await.unwrap();
 
-        assert!(matches!(&result, Bytes::Pooled(_)));
+        assert!(result.is_pooled());
         assert_eq!(result.as_ref(), b"hello world");
     }
 

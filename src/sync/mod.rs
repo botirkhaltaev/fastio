@@ -22,7 +22,7 @@ compile_error!("fastio sync supports Linux, macOS, and Windows only");
 #[cfg(test)]
 mod file_api_tests {
     use super::*;
-    use crate::{Bytes, WriteSlice, WriteSlices};
+    use crate::{WriteSlice, WriteSlices};
     use std::io::{Read, Seek, SeekFrom};
     use tempfile::TempDir;
 
@@ -57,12 +57,12 @@ mod file_api_tests {
 
         let bytes = File::open(&path).unwrap().read_all().unwrap();
 
-        assert!(matches!(&bytes, Bytes::Pooled(_)));
+        assert!(bytes.is_pooled());
         assert_eq!(bytes.as_ref(), b"abcdef");
     }
 
     #[test]
-    fn zero_length_read_returns_empty_vec() {
+    fn zero_length_read_returns_empty_bytes() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("model.bin");
         std::fs::write(&path, b"abcdef").unwrap();
@@ -71,7 +71,6 @@ mod file_api_tests {
         let bytes = file.read_at(0, 0).unwrap();
 
         assert!(bytes.is_empty());
-        assert!(matches!(&bytes, Bytes::Vec(_)));
     }
 
     #[test]

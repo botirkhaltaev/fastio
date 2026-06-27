@@ -24,8 +24,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 - Do not reintroduce a public availability API or backend identity trait. Platform and runtime failures should be returned by the I/O operation.
 - Keep `tokio` independent from Rayon. Tokio positioned operations must not block runtime worker threads directly; move blocking work into `spawn_blocking` with owned data.
 - Do not add Rayon unless there is a measured backend-specific need.
-- Gate optional storage types and APIs with their features (`mmap`, `pool`, `tokio`, `io-uring`).
-- Reads must allocate through the configured `Allocator`. With `pool` enabled, default reads should return pooled buffers; direct `Vec` allocation in read paths is a regression unless the caller explicitly chose `System` or the read is zero-length.
+- Gate optional storage types and APIs with their features (`mmap`, `tokio`, `io-uring`).
+- Read-capable backends must allocate through the internal `Bytes::allocate` path. Default reads should return pooled buffers; direct `Vec` allocation in read paths is a regression unless the read is zero-length.
 
 ## Style
 

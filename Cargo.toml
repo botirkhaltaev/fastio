@@ -2,7 +2,7 @@
 name = "fastio"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.93"
 description = "Fast cross-platform file I/O backends for Rust"
 license = "Apache-2.0"
 repository = "https://github.com/botirk38/fastio"
@@ -18,13 +18,13 @@ io-uring = ["dep:io-uring", "dep:libc"]
 
 [dependencies]
 memmap2 = { version = "0.9", optional = true }
-region = { version = "3.0.2", optional = true }
+region = { version = "3.0", optional = true }
 tokio = { version = "1", optional = true, features = ["rt", "rt-multi-thread", "fs", "macros", "io-util"] }
-zeropool = { version = "0.3.1", default-features = false }
+zeropool = { version = "0.7", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7", optional = true }
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
-tempfile = "3.14"
+tempfile = "3"
