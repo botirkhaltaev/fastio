@@ -32,6 +32,9 @@ thread_local! {
 }
 
 /// A Linux `io_uring` file handle.
+///
+/// Cursor-based [`Read`], [`Write`], and [`Seek`] operations and explicit
+/// positioned methods are backed by a thread-local `io_uring` instance.
 #[derive(Debug)]
 pub struct File {
     inner: std::fs::File,
@@ -134,9 +137,11 @@ impl File {
 
     /// Reads multiple `(offset, len)` regions in a single io_uring batch.
     ///
-    /// Each region is returned as a separate `Bytes` buffer. Empty regions are
-    /// returned as empty buffers. The caller is responsible for ensuring the
-    /// regions do not overlap, since reads are submitted concurrently.
+    /// This method is Linux-only and submits all of the requested reads to the
+    /// same `io_uring` batch. Each region is returned as a separate `Bytes`
+    /// buffer. Empty regions are returned as empty buffers. The caller is
+    /// responsible for ensuring the regions do not overlap, since reads are
+    /// submitted concurrently.
     pub fn read_at_batch(&self, regions: &[(u64, usize)]) -> io::Result<Vec<Bytes>> {
         if regions.is_empty() {
             return Ok(Vec::new());

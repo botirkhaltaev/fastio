@@ -27,6 +27,9 @@ impl MmapRegion {
         Self { inner, start, len }
     }
 
+    /// Returns a sub-region of `len` bytes starting at `offset` within this region.
+    ///
+    /// Returns `None` if the requested range is outside this region.
     #[inline]
     #[must_use]
     pub fn subregion(&self, offset: usize, len: usize) -> Option<Self> {
@@ -38,16 +41,21 @@ impl MmapRegion {
         Some(Self::new(Arc::clone(&self.inner), start, len))
     }
 
+    /// Returns the mapped bytes as a slice.
     #[inline]
     #[must_use]
     pub fn as_slice(&self) -> &[u8] {
         &self.inner[self.start..self.start + self.len]
     }
+
+    /// Returns the length of the mapped region in bytes.
     #[inline]
     #[must_use]
     pub const fn len(&self) -> usize {
         self.len
     }
+
+    /// Returns `true` if the region length is zero.
     #[inline]
     #[must_use]
     pub const fn is_empty(&self) -> bool {

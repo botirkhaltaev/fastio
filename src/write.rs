@@ -1,20 +1,38 @@
+//! Shared vocabulary for non-overlapping batch writes.
+//!
+//! [`WriteSlice`] names a single `(offset, data)` pair and [`WriteSlices`]
+//! validates that a collection of slices does not overlap.
+
 use std::io::{Error, ErrorKind};
 
 use crate::IoResult;
 
+/// A single non-overlapping write region.
+///
+/// `WriteSlice` pairs a file offset with a byte slice. It is used by
+/// [`WriteSlices`] to batch non-overlapping writes.
 #[derive(Debug, Clone, Copy)]
 pub struct WriteSlice<'a> {
+    /// File offset where the slice begins.
     pub offset: u64,
+    /// Bytes to write.
     pub data: &'a [u8],
 }
 
 impl<'a> WriteSlice<'a> {
+    /// Creates a new write slice at `offset` with `data`.
     #[inline]
     #[must_use]
     pub const fn new(offset: u64, data: &'a [u8]) -> Self {
         Self { offset, data }
     }
 
+    /// Returns the offset immediately after the slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` if the slice length does not fit in `u64` or if
+    /// `offset + data.len()` overflows.
     #[inline]
     pub fn end_offset(self) -> IoResult<u64> {
         let len = u64::try_from(self.data.len()).map_err(|e| {
@@ -29,10 +47,20 @@ impl<'a> WriteSlice<'a> {
     }
 }
 
+/// A validated, non-overlapping collection of write slices.
+///
+/// Constructed from a slice of [`WriteSlice`] values. Empty slices are allowed
+/// and ignored when checking for overlaps.
 #[derive(Debug, Clone, Copy)]
 pub struct WriteSlices<'s, 'd>(&'s [WriteSlice<'d>]);
 
 impl<'s, 'd> WriteSlices<'s, 'd> {
+    /// Validates that the slices are non-overlapping and returns the collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` if any slice overflows `u64` or if two
+    /// non-empty slices overlap.
     pub fn new(slices: &'s [WriteSlice<'d>]) -> IoResult<Self> {
         let mut sorted: Vec<(u64, u64)> = slices
             .iter()
@@ -48,18 +76,21 @@ impl<'s, 'd> WriteSlices<'s, 'd> {
         Ok(Self(slices))
     }
 
+    /// Returns the underlying slice.
     #[inline]
     #[must_use]
     pub const fn as_slice(self) -> &'s [WriteSlice<'d>] {
         self.0
     }
 
+    /// Returns the number of slices, including empty ones.
     #[inline]
     #[must_use]
     pub const fn len(self) -> usize {
         self.0.len()
     }
 
+    /// Returns `true` if there are no slices.
     #[inline]
     #[must_use]
     pub const fn is_empty(self) -> bool {

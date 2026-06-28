@@ -2,6 +2,9 @@
 //!
 //! This module mirrors `tokio::fs` where behavior matches, while adding async
 //! positioned I/O methods for large-file workloads.
+//!
+//! Positioned reads and writes are offloaded to `tokio::task::spawn_blocking`
+//! with cloned handles so they do not block Tokio runtime worker threads.
 
 use std::fs::{Metadata, Permissions};
 use std::io;
@@ -17,8 +20,9 @@ compile_error!("fastio tokio supports Linux, macOS, and Windows only");
 /// A Tokio-backed file handle.
 ///
 /// Regular filesystem operations delegate to `tokio::fs`. Positioned
-/// reads and writes move the underlying `std::fs::File` into `spawn_blocking`
-/// so they do not block Tokio runtime worker threads.
+/// reads and writes clone the underlying `std::fs::File` handle and move it
+/// into `tokio::task::spawn_blocking` so they do not block Tokio runtime
+/// worker threads.
 #[derive(Debug)]
 pub struct File {
     inner: ::tokio::fs::File,
@@ -88,6 +92,9 @@ impl File {
     }
 
     /// Reads the whole file into memory from offset 0.
+    ///
+    /// This clones the underlying handle and performs the read inside
+    /// `tokio::task::spawn_blocking`.
     pub async fn read_all(&self) -> io::Result<Bytes> {
         let file = self.inner.try_clone().await?.into_std().await;
         ::tokio::task::spawn_blocking(move || {
@@ -100,6 +107,9 @@ impl File {
     }
 
     /// Reads `len` bytes at `offset` into a new buffer.
+    ///
+    /// This clones the underlying handle and performs the read inside
+    /// `tokio::task::spawn_blocking`.
     pub async fn read_at(&self, offset: u64, len: usize) -> io::Result<Bytes> {
         let file = self.inner.try_clone().await?.into_std().await;
         ::tokio::task::spawn_blocking(move || {
@@ -110,6 +120,9 @@ impl File {
     }
 
     /// Reads exactly enough bytes to fill `buf` at `offset`.
+    ///
+    /// This clones the underlying handle and performs the read inside
+    /// `tokio::task::spawn_blocking`.
     pub async fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         if buf.is_empty() {
             return Ok(());
@@ -128,6 +141,9 @@ impl File {
     }
 
     /// Writes all bytes from `buf` at `offset`.
+    ///
+    /// This clones the underlying handle and performs the write inside
+    /// `tokio::task::spawn_blocking`.
     pub async fn write_all_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
         if buf.is_empty() {
             return Ok(());
@@ -140,6 +156,10 @@ impl File {
     }
 
     /// Writes non-overlapping slices at their offsets.
+    ///
+    /// This clones the underlying handle and performs the writes inside
+    /// `tokio::task::spawn_blocking`. Writes within a batch are partitioned
+    /// across a bounded number of threads.
     pub async fn write_slices_at(&self, writes: WriteSlices<'_, '_>) -> io::Result<()> {
         let file = self.inner.try_clone().await?.into_std().await;
         let writes = writes
