@@ -388,21 +388,15 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn positioned_io_works_on_current_thread_runtime() {
-        let rt = ::tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("current-thread.bin");
-        rt.block_on(async {
-            let file = File::create(&path).await.unwrap();
-            file.write_all_at(0, b"hello").await.unwrap();
-            let file = File::open(&path).await.unwrap();
-            let buf = file.read_at(0, 5).await.unwrap();
-            assert_eq!(buf.as_ref(), b"hello");
-        });
+        let file = File::create(&path).await.unwrap();
+        file.write_all_at(0, b"hello").await.unwrap();
+        let file = File::open(&path).await.unwrap();
+        let buf = file.read_at(0, 5).await.unwrap();
+        assert_eq!(buf.as_ref(), b"hello");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -503,12 +497,8 @@ mod tests {
         assert_eq!(result.as_ref(), b"AB------CD");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn write_slices_at_works_on_current_thread_runtime() {
-        let rt = ::tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("current-thread-batch.bin");
         std::fs::write(&path, b"--------").unwrap();
@@ -516,28 +506,6 @@ mod tests {
             crate::WriteSlice::new(0, b"AB"),
             crate::WriteSlice::new(6, b"YZ"),
         ];
-        rt.block_on(async {
-            let file = OpenOptions::new().write(true).open(&path).await.unwrap();
-
-            file.write_slices_at(crate::WriteSlices::new(&slices).unwrap())
-                .await
-                .unwrap();
-            let file = File::open(&path).await.unwrap();
-            let result = file.read_all().await.unwrap();
-            assert_eq!(result.as_ref(), b"AB----YZ");
-        });
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn write_slices_handles_batches_larger_than_worker_count() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("batch.bin");
-        let payloads: Vec<Vec<u8>> = (0..16).map(|i| vec![(b'a' + i) as u8; 2]).collect();
-        let slices = payloads
-            .iter()
-            .enumerate()
-            .map(|(idx, data)| crate::WriteSlice::new((idx * 2) as u64, data.as_slice()))
-            .collect::<Vec<_>>();
         let file = OpenOptions::new().write(true).open(&path).await.unwrap();
 
         file.write_slices_at(crate::WriteSlices::new(&slices).unwrap())
@@ -545,7 +513,33 @@ mod tests {
             .unwrap();
         let file = File::open(&path).await.unwrap();
         let result = file.read_all().await.unwrap();
-        let expected: Vec<u8> = (0..16).flat_map(|i| vec![(b'a' + i) as u8; 2]).collect();
+        assert_eq!(result.as_ref(), b"AB----YZ");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_slices_handles_batches_larger_than_worker_count() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("batch.bin");
+        let payloads: Vec<Vec<u8>> = (0..16).map(|i| vec![b'a' + i as u8; 2]).collect();
+        let slices = payloads
+            .iter()
+            .enumerate()
+            .map(|(idx, data)| crate::WriteSlice::new((idx * 2) as u64, data.as_slice()))
+            .collect::<Vec<_>>();
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .await
+            .unwrap();
+
+        file.write_slices_at(crate::WriteSlices::new(&slices).unwrap())
+            .await
+            .unwrap();
+        let file = File::open(&path).await.unwrap();
+        let result = file.read_all().await.unwrap();
+        let expected: Vec<u8> = (0..16).flat_map(|i| vec![b'a' + i as u8; 2]).collect();
         assert_eq!(result.as_ref(), &expected[..]);
     }
 }

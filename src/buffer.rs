@@ -13,7 +13,7 @@
 
 use std::fmt;
 
-#[cfg(feature = "mmap")]
+#[cfg(all(test, feature = "mmap"))]
 use std::sync::Arc;
 
 #[cfg(any(feature = "sync", feature = "tokio", feature = "io-uring"))]
