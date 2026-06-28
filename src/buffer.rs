@@ -57,7 +57,9 @@ impl Bytes {
         init: impl FnOnce(&mut [u8]) -> crate::IoResult<()>,
     ) -> crate::IoResult<Self> {
         if len == 0 {
-            return Ok(Self { inner: Storage::Vec(Vec::new()) });
+            return Ok(Self {
+                inner: Storage::Vec(Vec::new()),
+            });
         }
         let mut uninit = global_pool().alloc_uninit(len);
         let uninit_slice = uninit.as_uninit_mut();
@@ -69,14 +71,18 @@ impl Bytes {
         init(init_slice)?;
         // SAFETY: the closure has promised to initialize all bytes in `init_slice`.
         let buf = unsafe { uninit.assume_init() };
-        Ok(Self { inner: Storage::Pooled(buf) })
+        Ok(Self {
+            inner: Storage::Pooled(buf),
+        })
     }
 
     /// Wrap a plain `Vec<u8>`.
     #[inline]
     #[must_use]
     pub fn from_vec(v: Vec<u8>) -> Self {
-        Self { inner: Storage::Vec(v) }
+        Self {
+            inner: Storage::Vec(v),
+        }
     }
 
     /// Wrap a memory-mapped region.
@@ -84,7 +90,9 @@ impl Bytes {
     #[inline]
     #[must_use]
     pub fn from_mmap(region: MmapRegion) -> Self {
-        Self { inner: Storage::Mmap(region) }
+        Self {
+            inner: Storage::Mmap(region),
+        }
     }
 
     /// Number of bytes.
@@ -175,7 +183,9 @@ impl std::ops::Deref for Bytes {
 
 impl fmt::Debug for Bytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Bytes").field("len", &self.len()).finish_non_exhaustive()
+        f.debug_struct("Bytes")
+            .field("len", &self.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -338,7 +348,10 @@ mod tests {
         let data = vec![7u8, 8, 9];
         assert_eq!(Bytes::from_vec(data.clone()).into_vec(), data);
         #[cfg(feature = "mmap")]
-        assert_eq!(Bytes::from_mmap(make_mmap_region()).into_vec(), b"hello_mmap");
+        assert_eq!(
+            Bytes::from_mmap(make_mmap_region()).into_vec(),
+            b"hello_mmap"
+        );
     }
 
     #[test]

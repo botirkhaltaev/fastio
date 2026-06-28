@@ -132,6 +132,112 @@ impl File {
         Bytes::allocate(len, |buf| self.read_exact_at(offset, buf))
     }
 
+    /// Reads multiple `(offset, len)` regions in a single io_uring batch.
+    ///
+    /// Each region is returned as a separate `Bytes` buffer. Empty regions are
+    /// returned as empty buffers. The caller is responsible for ensuring the
+    /// regions do not overlap, since reads are submitted concurrently.
+    pub fn read_at_batch(&self, regions: &[(u64, usize)]) -> io::Result<Vec<Bytes>> {
+        if regions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut buffers: Vec<Bytes> = regions
+            .iter()
+            .map(|&(_, len)| Bytes::allocate(len, |_| Ok(())))
+            .collect::<io::Result<_>>()?;
+
+        let depth = self.ring_depth;
+        let fd = self.inner.as_raw_fd();
+        self.with_ring(|ring| {
+            let n = regions.len();
+            let mut done = vec![0usize; n];
+            let mut state = vec![SubmissionState::Idle; n];
+            let mut in_flight: u32 = 0;
+            let mut pending_error: Option<io::Error> = None;
+
+            loop {
+                for idx in 0..n {
+                    if pending_error.is_some() || in_flight >= depth {
+                        break;
+                    }
+                    if state[idx] != SubmissionState::Idle {
+                        continue;
+                    }
+                    let (offset, len) = regions[idx];
+                    if len == 0 {
+                        state[idx] = SubmissionState::Done;
+                        continue;
+                    }
+                    let so_far = done[idx];
+                    let remaining = len - so_far;
+                    if remaining == 0 {
+                        state[idx] = SubmissionState::Done;
+                        continue;
+                    }
+                    let io_len = remaining.min(MAX_IO_LEN) as u32;
+                    let buf = buffers[idx]
+                        .as_mut_slice()
+                        .ok_or_else(|| io::Error::other("batch buffer not mutable"))?;
+                    // SAFETY: `so_far < len` and `buf` outlives the ring borrow.
+                    let ptr = unsafe { buf.as_mut_ptr().add(so_far) };
+                    let file_offset = offset.checked_add(so_far as u64).ok_or_else(|| {
+                        Error::new(ErrorKind::InvalidInput, "read offset overflow")
+                    })?;
+                    let entry = opcode::Read::new(types::Fd(fd), ptr, io_len)
+                        .offset(file_offset)
+                        .build()
+                        .user_data(idx as u64);
+                    {
+                        let mut sq = ring.submission();
+                        if unsafe { sq.push(&entry) }.is_err() {
+                            pending_error.get_or_insert_with(|| Error::other("io_uring SQ full"));
+                            break;
+                        }
+                    }
+                    state[idx] = SubmissionState::InFlight;
+                    in_flight += 1;
+                }
+
+                if in_flight == 0 {
+                    if let Some(err) = pending_error {
+                        return Err(err);
+                    }
+                    break;
+                }
+
+                if let Err(err) = ring.submit_and_wait(1) {
+                    pending_error.get_or_insert(err);
+                }
+
+                let cq: Vec<_> = ring.completion().collect();
+                for cqe in cq {
+                    in_flight -= 1;
+                    let idx = cqe.user_data() as usize;
+                    state[idx] = SubmissionState::Idle;
+                    let result = cqe.result();
+                    if result < 0 {
+                        pending_error.get_or_insert_with(|| Error::from_raw_os_error(-result));
+                        continue;
+                    }
+                    let n_read = result as usize;
+                    if n_read == 0 {
+                        pending_error.get_or_insert_with(|| {
+                            Error::new(ErrorKind::UnexpectedEof, "short io_uring batch read")
+                        });
+                        continue;
+                    }
+                    done[idx] += n_read;
+                    if done[idx] >= regions[idx].1 {
+                        state[idx] = SubmissionState::Done;
+                    }
+                }
+            }
+
+            Ok(buffers)
+        })
+    }
+
     /// Reads exactly enough bytes to fill `buf` at `offset`.
     #[inline]
     pub fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {

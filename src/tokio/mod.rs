@@ -461,7 +461,10 @@ mod tests {
         std::fs::write(&path, b"hello world").unwrap();
         let file = File::open(&path).await.unwrap();
         let cloned = file.try_clone().await.unwrap();
-        assert_eq!(file.metadata().await.unwrap().len(), cloned.metadata().await.unwrap().len());
+        assert_eq!(
+            file.metadata().await.unwrap().len(),
+            cloned.metadata().await.unwrap().len()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
