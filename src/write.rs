@@ -114,4 +114,70 @@ mod tests {
         assert_eq!(writes.as_slice()[0].offset, 10);
         assert_eq!(writes.as_slice()[1].offset, 0);
     }
+
+    #[test]
+    fn write_slices_rejects_offset_overflow() {
+        let a = WriteSlice::new(u64::MAX - 1, b"aa");
+        let b = WriteSlice::new(0, b"x");
+        let err = WriteSlices::new(&[a, b]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn write_slices_allows_many_non_overlapping_slices() {
+        let data: Vec<Vec<u8>> = (0..100).map(|i| vec![i as u8; 2]).collect();
+        let slices: Vec<_> = data
+            .iter()
+            .enumerate()
+            .map(|(i, d)| WriteSlice::new((i * 2) as u64, d.as_slice()))
+            .collect();
+        assert!(WriteSlices::new(&slices).is_ok());
+    }
+
+    #[test]
+    fn write_slices_detects_overlap_in_many_slices() {
+        let overlap_data = b"overlap".to_vec();
+        let data: Vec<Vec<u8>> = (0..50)
+            .map(|i| {
+                if i == 25 {
+                    overlap_data.clone()
+                } else {
+                    vec![i as u8; 4]
+                }
+            })
+            .collect();
+        let mut slices: Vec<_> = data
+            .iter()
+            .enumerate()
+            .map(|(i, d)| WriteSlice::new((i * 4) as u64, d.as_slice()))
+            .collect();
+        // Introduce an overlap.
+        slices[25] = WriteSlice::new(90, data[25].as_slice());
+        let err = WriteSlices::new(&slices).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn write_slices_empty_input_is_ok() {
+        let writes = WriteSlices::new(&[]).unwrap();
+        assert!(writes.is_empty());
+    }
+
+    #[test]
+    fn write_slices_all_empty_slices_are_ok() {
+        let a = WriteSlice::new(0, b"");
+        let b = WriteSlice::new(0, b"");
+        let c = WriteSlice::new(100, b"");
+        assert!(WriteSlices::new(&[a, b, c]).is_ok());
+    }
+
+    #[test]
+    fn write_slices_boundary_touching_is_allowed() {
+        let a = WriteSlice::new(0, b"abc");
+        let b = WriteSlice::new(3, b"");
+        let c = WriteSlice::new(3, b"def");
+        let binding = [a, b, c];
+        let writes = WriteSlices::new(&binding).unwrap();
+        assert_eq!(writes.len(), 3);
+    }
 }

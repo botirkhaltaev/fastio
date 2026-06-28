@@ -483,6 +483,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn zero_length_write_is_noop() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("noop.bin");
+        std::fs::write(&path, b"----------").unwrap();
+
+        let file = OpenOptions::new().write(true).open(&path).await.unwrap();
+        file.write_all_at(0, b"").await.unwrap();
+        file.write_all_at(5, b"").await.unwrap();
+
+        let file = File::open(&path).await.unwrap();
+        let result = file.read_all().await.unwrap();
+        assert_eq!(result.as_ref(), b"----------");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn write_slices_batches_into_existing_file() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("data.bin");
