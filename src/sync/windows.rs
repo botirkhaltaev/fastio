@@ -89,50 +89,82 @@ impl File {
         Bytes::allocate(len, |buf| self.read_exact_at(offset, buf))
     }
 
+    /// Positioned read that does not require a seek.
+    ///
+    /// # Cursor semantics on Windows
+    ///
+    /// This implementation saves the current file pointer, performs the read
+    /// via `seek_read`, and then restores the saved pointer. The save/restore
+    /// is not atomic: concurrent operations on the same underlying handle (or
+    /// a clone that shares the same kernel file object) may observe the
+    /// temporary cursor position. The original read error is preserved if the
+    /// restore also fails.
     pub fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         let mut handle = &self.inner;
         let original_position = handle.stream_position()?;
+        let result = self.seek_read_exact(offset, buf);
+        let restore = handle.seek(SeekFrom::Start(original_position));
+        match result {
+            Ok(()) => restore.map(|_| ()),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Positioned write that does not require a seek.
+    ///
+    /// # Cursor semantics on Windows
+    ///
+    /// This implementation saves the current file pointer, performs the write
+    /// via `seek_write`, and then restores the saved pointer. The save/restore
+    /// is not atomic: concurrent operations on the same underlying handle (or
+    /// a clone that shares the same kernel file object) may observe the
+    /// temporary cursor position. The original write error is preserved if the
+    /// restore also fails.
+    pub fn write_all_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
+        let mut handle = &self.inner;
+        let original_position = handle.stream_position()?;
+        let result = self.seek_write_exact(offset, buf);
+        let restore = handle.seek(SeekFrom::Start(original_position));
+        match result {
+            Ok(()) => restore.map(|_| ()),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn seek_read_exact(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         let mut read = 0usize;
-        let mut result = Ok(());
         while read < buf.len() {
             let read_offset = offset.checked_add(read as u64).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "read offset overflow")
             })?;
             let n = self.inner.seek_read(&mut buf[read..], read_offset)?;
             if n == 0 {
-                result = Err(io::Error::new(
+                return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "seek_read returned zero bytes before buffer was filled",
                 ));
-                break;
             }
             read += n;
         }
-        let restore = handle.seek(SeekFrom::Start(original_position));
-        result.and(restore.map(|_| ()))
+        Ok(())
     }
 
-    pub fn write_all_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
-        let mut handle = &self.inner;
-        let original_position = handle.stream_position()?;
+    fn seek_write_exact(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
         let mut written = 0usize;
-        let mut result = Ok(());
         while written < buf.len() {
             let write_offset = offset.checked_add(written as u64).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "write offset overflow")
             })?;
             let n = self.inner.seek_write(&buf[written..], write_offset)?;
             if n == 0 {
-                result = Err(io::Error::new(
+                return Err(io::Error::new(
                     io::ErrorKind::WriteZero,
                     "seek_write returned zero bytes",
                 ));
-                break;
             }
             written += n;
         }
-        let restore = handle.seek(SeekFrom::Start(original_position));
-        result.and(restore.map(|_| ()))
+        Ok(())
     }
 
     pub fn write_slices_at(&self, writes: WriteSlices<'_, '_>) -> io::Result<()> {
@@ -235,5 +267,90 @@ impl OpenOptions {
 impl Default for OpenOptions {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::io::{Read, Seek, SeekFrom};
+    use tempfile::TempDir;
+
+    #[test]
+    fn read_exact_at_preserves_cursor_position() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cursor.bin");
+        std::fs::write(&path, b"abcdefghij").unwrap();
+        let mut file = File::open(&path).unwrap();
+
+        file.seek(SeekFrom::Start(2)).unwrap();
+        let mut buf = [0u8; 3];
+        file.read_exact_at(5, &mut buf).unwrap();
+        assert_eq!(&buf, b"fgh");
+
+        let mut after = [0u8; 1];
+        file.read_exact(&mut after).unwrap();
+        assert_eq!(&after, b"c");
+    }
+
+    #[test]
+    fn write_all_at_preserves_cursor_position() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cursor.bin");
+        std::fs::write(&path, b"abcdefghij").unwrap();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        file.seek(SeekFrom::Start(1)).unwrap();
+        file.write_all_at(6, b"XYZ").unwrap();
+
+        let mut after = [0u8; 1];
+        file.read_exact(&mut after).unwrap();
+        assert_eq!(&after, b"b");
+
+        drop(file);
+        assert_eq!(std::fs::read(&path).unwrap(), b"abcdefXYZj");
+    }
+
+    #[test]
+    fn cloned_handle_sees_cursor_restore() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("clone.bin");
+        std::fs::write(&path, b"abcdefghij").unwrap();
+        let mut file = File::open(&path).unwrap();
+        let cloned = file.try_clone().unwrap();
+
+        file.seek(SeekFrom::Start(4)).unwrap();
+        let mut buf = [0u8; 2];
+        cloned.read_exact_at(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"ab");
+
+        // Cloned read should not move the original cursor.
+        let mut after = [0u8; 1];
+        file.read_exact(&mut after).unwrap();
+        assert_eq!(&after, b"e");
+    }
+
+    #[test]
+    fn read_at_offset_zero_len_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("empty.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        let file = File::open(&path).unwrap();
+        let result = file.read_at(0, 0).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn read_at_beyond_file_returns_short_read_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("short.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        let file = File::open(&path).unwrap();
+        let err = file.read_at(10, 4).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
 }
