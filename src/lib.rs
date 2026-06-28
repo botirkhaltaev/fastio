@@ -10,9 +10,10 @@
 //!
 //! - `sync`: synchronous `std::fs`-like file I/O.
 //! - `mmap`: read-only memory maps using `memmap2`.
-//! - `pool`: pooled read buffers using `zeropool`.
 //! - `tokio`: async I/O using Tokio, without a Rayon dependency.
 //! - `io-uring`: Linux-only `io_uring` backend.
+//!
+//! Read-capable backends allocate from an internal process-wide buffer pool.
 //!
 //! # Example
 //!
@@ -39,9 +40,7 @@ pub mod uring;
 pub use std::io::Error;
 pub use std::io::Result as IoResult;
 
+pub use buffer::Bytes;
 #[cfg(feature = "mmap")]
-pub use buffer::MmapRegion;
-pub use buffer::{Allocator, DefaultAllocator, OwnedBytes, System};
-#[cfg(feature = "pool")]
-pub use buffer::{Pool, PooledBuffer};
+pub use mmap::MmapRegion;
 pub use write::{WriteSlice, WriteSlices};

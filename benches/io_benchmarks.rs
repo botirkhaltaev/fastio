@@ -134,19 +134,6 @@ fn bench_read_all(c: &mut Criterion) {
             });
         });
 
-        // --- fastio::sync::File::read_all (System allocator) ---
-        group.bench_function(BenchmarkId::new("fastio_sync_system", label), |b| {
-            let file = fastio::sync::File::options()
-                .read(true)
-                .allocator(fastio::System)
-                .open(&path)
-                .unwrap();
-            b.iter(|| {
-                let bytes = file.read_all().unwrap();
-                black_box(bytes.len());
-            });
-        });
-
         // --- fastio::mmap::File::map ---
         group.bench_function(BenchmarkId::new("fastio_mmap", label), |b| {
             let file = fastio::mmap::File::open(&path).unwrap();
@@ -235,19 +222,6 @@ fn bench_read_at(c: &mut Criterion) {
         // --- fastio::sync::File::read_at ---
         group.bench_function(BenchmarkId::new("fastio_sync", label), |b| {
             let file = fastio::sync::File::open(&path).unwrap();
-            b.iter(|| {
-                let bytes = file.read_at(READ_AT_OFFSET, READ_AT_LEN).unwrap();
-                black_box(bytes.len());
-            });
-        });
-
-        // --- fastio::sync::File::read_at (System allocator) ---
-        group.bench_function(BenchmarkId::new("fastio_sync_system", label), |b| {
-            let file = fastio::sync::File::options()
-                .read(true)
-                .allocator(fastio::System)
-                .open(&path)
-                .unwrap();
             b.iter(|| {
                 let bytes = file.read_at(READ_AT_OFFSET, READ_AT_LEN).unwrap();
                 black_box(bytes.len());
@@ -478,55 +452,7 @@ fn bench_write_slices(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. allocator — Pool vs System allocation throughput
-// ---------------------------------------------------------------------------
-
-fn bench_allocator(c: &mut Criterion) {
-    use fastio::buffer::Allocator;
-
-    let alloc_sizes: &[(usize, &str)] = &[
-        (4 * 1024, "4KiB"),
-        (64 * 1024, "64KiB"),
-        (1024 * 1024, "1MiB"),
-        (16 * 1024 * 1024, "16MiB"),
-    ];
-
-    for &(size, label) in alloc_sizes {
-        let mut group = c.benchmark_group(format!("allocator/{label}"));
-        group.throughput(Throughput::Bytes(size as u64));
-
-        // --- Vec::from zeroed (baseline) ---
-        group.bench_function(BenchmarkId::new("vec_zeroed", label), |b| {
-            b.iter(|| {
-                let v = vec![0u8; size];
-                black_box(v.len());
-            });
-        });
-
-        // --- System allocator ---
-        group.bench_function(BenchmarkId::new("system", label), |b| {
-            let alloc = fastio::System;
-            b.iter(|| {
-                let bytes = alloc.allocate(size);
-                black_box(bytes.len());
-            });
-        });
-
-        // --- Pool allocator ---
-        group.bench_function(BenchmarkId::new("pool", label), |b| {
-            let alloc = fastio::Pool;
-            b.iter(|| {
-                let bytes = alloc.allocate(size);
-                black_box(bytes.len());
-            });
-        });
-
-        group.finish();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 6. mmap — map vs map_range vs raw memmap2
+// 5. mmap — map vs map_range vs raw memmap2
 // ---------------------------------------------------------------------------
 
 fn bench_mmap(c: &mut Criterion) {
@@ -634,24 +560,6 @@ fn bench_async_read(c: &mut Criterion) {
             b.iter(|| {
                 rt.block_on(async {
                     let file = fastio::tokio::File::open(&p).await.unwrap();
-                    let bytes = file.read_all().await.unwrap();
-                    black_box(bytes.len());
-                });
-            });
-        });
-
-        // --- fastio::tokio::File::read_all (System allocator) ---
-        group.bench_function(BenchmarkId::new("fastio_tokio_system", label), |b| {
-            let rt = tokio_rt();
-            let p = path.clone();
-            b.iter(|| {
-                rt.block_on(async {
-                    let file = fastio::tokio::File::options()
-                        .read(true)
-                        .allocator(fastio::System)
-                        .open(&p)
-                        .await
-                        .unwrap();
                     let bytes = file.read_all().await.unwrap();
                     black_box(bytes.len());
                 });
@@ -941,7 +849,6 @@ criterion_group!(
     bench_read_at,
     bench_write_all_at,
     bench_write_slices,
-    bench_allocator,
     bench_mmap,
     bench_async_read,
     bench_async_write,
@@ -957,7 +864,6 @@ criterion_group!(
     bench_read_at,
     bench_write_all_at,
     bench_write_slices,
-    bench_allocator,
     bench_mmap,
     bench_async_read,
     bench_async_write,

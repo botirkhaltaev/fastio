@@ -22,18 +22,9 @@ compile_error!("fastio sync supports Linux, macOS, and Windows only");
 #[cfg(test)]
 mod file_api_tests {
     use super::*;
-    use crate::{Allocator, OwnedBytes, System, WriteSlice, WriteSlices};
+    use crate::{WriteSlice, WriteSlices};
     use std::io::{Read, Seek, SeekFrom};
     use tempfile::TempDir;
-
-    #[derive(Debug, Clone)]
-    struct ShortAllocator;
-
-    impl Allocator for ShortAllocator {
-        fn allocate(&self, len: usize) -> OwnedBytes {
-            OwnedBytes::Vec(vec![0; len.saturating_sub(1)])
-        }
-    }
 
     #[test]
     fn file_read_all_reads_entire_file() {
@@ -58,7 +49,6 @@ mod file_api_tests {
         assert_eq!(bytes.as_ref(), b"cde");
     }
 
-    #[cfg(feature = "pool")]
     #[test]
     fn default_allocator_returns_pooled_read_buffer() {
         let dir = TempDir::new().unwrap();
@@ -67,25 +57,20 @@ mod file_api_tests {
 
         let bytes = File::open(&path).unwrap().read_all().unwrap();
 
-        assert!(matches!(&bytes, OwnedBytes::Pooled(_)));
+        assert!(bytes.is_pooled());
         assert_eq!(bytes.as_ref(), b"abcdef");
     }
 
     #[test]
-    fn system_allocator_returns_vec_read_buffer() {
+    fn zero_length_read_returns_empty_bytes() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("model.bin");
         std::fs::write(&path, b"abcdef").unwrap();
 
-        let file = OpenOptions::new()
-            .read(true)
-            .allocator(System)
-            .open(&path)
-            .unwrap();
-        let bytes = file.read_at(1, 3).unwrap();
+        let file = File::open(&path).unwrap();
+        let bytes = file.read_at(0, 0).unwrap();
 
-        assert!(matches!(&bytes, OwnedBytes::Vec(_)));
-        assert_eq!(bytes.as_ref(), b"bcd");
+        assert!(bytes.is_empty());
     }
 
     #[test]
@@ -137,21 +122,5 @@ mod file_api_tests {
         let err = WriteSlices::new(&slices).unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn read_reports_allocator_contract_violation() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("model.bin");
-        std::fs::write(&path, b"abcdef").unwrap();
-        let file = OpenOptions::new()
-            .read(true)
-            .allocator(ShortAllocator)
-            .open(&path)
-            .unwrap();
-
-        let err = file.read_at(0, 3).unwrap_err();
-
-        assert_eq!(err.kind(), std::io::ErrorKind::Other);
     }
 }

@@ -5,8 +5,8 @@
 //   cargo build --release --all-features --bench profile_targets
 //   perf record -g --call-graph dwarf -- target/release/deps/profile_targets-* <target>
 //
-// Targets: read_at_pool, read_at_system, read_at_std, async_read_fastio,
-//          async_read_raw, uring_read, uring_read_all, allocator_pool, allocator_system
+// Targets: read_at_fastio, read_at_std, async_read_fastio,
+//          async_read_raw, uring_read_at, uring_read_all
 
 use std::hint::black_box;
 use std::io::Write;
@@ -23,20 +23,8 @@ fn create_test_file(dir: &std::path::Path, name: &str, size: usize) -> std::path
     path
 }
 
-fn profile_read_at_pool(path: &std::path::Path) {
+fn profile_read_at_fastio(path: &std::path::Path) {
     let file = fastio::sync::File::open(path).unwrap();
-    for _ in 0..ITERATIONS {
-        let buf = file.read_at(READ_AT_OFFSET, READ_AT_LEN).unwrap();
-        black_box(buf.len());
-    }
-}
-
-fn profile_read_at_system(path: &std::path::Path) {
-    let file = fastio::sync::File::options()
-        .read(true)
-        .allocator(fastio::buffer::System)
-        .open(path)
-        .unwrap();
     for _ in 0..ITERATIONS {
         let buf = file.read_at(READ_AT_OFFSET, READ_AT_LEN).unwrap();
         black_box(buf.len());
@@ -98,22 +86,6 @@ fn profile_uring_read_all(path: &std::path::Path) {
     }
 }
 
-fn profile_allocator_pool() {
-    let pool = fastio::buffer::Pool;
-    for _ in 0..ITERATIONS {
-        let buf = fastio::Allocator::allocate(&pool, READ_AT_LEN);
-        black_box(buf.len());
-    }
-}
-
-fn profile_allocator_system() {
-    let sys = fastio::buffer::System;
-    for _ in 0..ITERATIONS {
-        let buf = fastio::Allocator::allocate(&sys, READ_AT_LEN);
-        black_box(buf.len());
-    }
-}
-
 fn main() {
     let target = match std::env::args().nth(1) {
         Some(t) => t,
@@ -121,8 +93,8 @@ fn main() {
             // No argument: exit gracefully so `cargo test --bench` succeeds.
             eprintln!(
                 "Usage: profile_targets <target>\n\
-                 Targets: read_at_pool, read_at_system, read_at_std, async_read_fastio,\n\
-                 async_read_raw, uring_read_at, uring_read_all, allocator_pool, allocator_system"
+                 Targets: read_at_fastio, read_at_std, async_read_fastio,\n\
+                 async_read_raw, uring_read_at, uring_read_all"
             );
             return;
         }
@@ -137,8 +109,7 @@ fn main() {
     eprintln!("Profiling {target} with {ITERATIONS} iterations...");
 
     match target.as_str() {
-        "read_at_pool" => profile_read_at_pool(&path),
-        "read_at_system" => profile_read_at_system(&path),
+        "read_at_fastio" => profile_read_at_fastio(&path),
         #[cfg(unix)]
         "read_at_std" => profile_read_at_std(&path),
         "async_read_fastio" => profile_async_read_fastio(&path),
@@ -147,8 +118,6 @@ fn main() {
         "uring_read_at" => profile_uring_read_at(&path),
         #[cfg(all(target_os = "linux", feature = "io-uring"))]
         "uring_read_all" => profile_uring_read_all(&path),
-        "allocator_pool" => profile_allocator_pool(),
-        "allocator_system" => profile_allocator_system(),
         other => {
             eprintln!("Unknown target: {other}");
             std::process::exit(1);

@@ -3,12 +3,70 @@
 //! This module exposes a small file-first API for read-only memory maps. The
 //! returned [`MmapRegion`] is cheaply cloneable and implements `AsRef<[u8]>`.
 
-use crate::{IoResult, buffer::MmapRegion};
+use crate::IoResult;
 use memmap2::MmapOptions as MemmapOptions;
 use std::fs::{File as StdFile, Metadata};
 use std::io::{Error, ErrorKind};
 use std::path::Path;
 use std::sync::Arc;
+
+/// A memory-mapped file region backed by an `Arc<memmap2::Mmap>`.
+///
+/// Cheaply cloneable; `as_slice()` returns exactly `len` bytes starting at
+/// `start` within the underlying mapping.
+#[derive(Debug, Clone)]
+pub struct MmapRegion {
+    inner: Arc<memmap2::Mmap>,
+    start: usize,
+    len: usize,
+}
+
+impl MmapRegion {
+    pub(crate) fn new(inner: Arc<memmap2::Mmap>, start: usize, len: usize) -> Self {
+        debug_assert!(start.checked_add(len).is_some_and(|end| end <= inner.len()));
+        Self { inner, start, len }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn subregion(&self, offset: usize, len: usize) -> Option<Self> {
+        let relative_end = offset.checked_add(len)?;
+        if relative_end > self.len {
+            return None;
+        }
+        let start = self.start.checked_add(offset)?;
+        Some(Self::new(Arc::clone(&self.inner), start, len))
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.inner[self.start..self.start + self.len]
+    }
+    #[inline]
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+    #[inline]
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl AsRef<[u8]> for MmapRegion {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl std::ops::Deref for MmapRegion {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
 
 /// A file handle for memory-mapped reads.
 #[derive(Debug)]
@@ -110,8 +168,8 @@ impl File {
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "mapping length overflow"))?;
         // SAFETY: the requested range has been bounds-checked against file_len,
         // and the offset passed to memmap2 is page-aligned as required. As with
-        // all mmap APIs, external truncation or mutation can still fault when
-        // the mapping is accessed.
+        // all mmap APIs, external truncation or mutation can still fault when the
+        // mapping is accessed.
         let inner = unsafe {
             MemmapOptions::new()
                 .offset(aligned_offset)
@@ -268,11 +326,12 @@ mod tests {
     fn region_is_cheaply_cloneable() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("clone.bin");
-        std::fs::write(&path, b"hello clone").unwrap();
+        std::fs::write(&path, b"hello_mmap").unwrap();
 
-        let r1 = File::open(&path).unwrap().map().unwrap();
-        let r2 = r1.clone();
-        assert_eq!(r1.as_slice(), r2.as_slice());
-        assert_eq!(r2.as_slice(), b"hello clone");
+        let region = File::open(&path).unwrap().map().unwrap();
+        let cloned = region.clone();
+
+        assert_eq!(cloned.as_slice(), b"hello_mmap");
+        assert_eq!(region.as_slice(), b"hello_mmap");
     }
 }

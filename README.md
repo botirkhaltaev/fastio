@@ -11,8 +11,8 @@ different I/O backends to find what fits your application best.
 `fastio` gives you explicit, backend owned file handles with no hidden defaults.
 Instead of a single `File` type, you pick the backend that matches your workload:
 `sync::File`, `tokio::File`, `mmap::File`, or `uring::File`. Each backend is
-tuned for its I/O strategy, and reads allocate through a configurable `Allocator`
-(pooled by default) so bulk workloads skip repeated allocation overhead.
+tuned for its I/O strategy. Read methods allocate through an internal process-wide
+pool so bulk workloads skip repeated allocation overhead.
 
 There is no default backend and no module level convenience API. You choose.
 
@@ -43,15 +43,15 @@ cargo bench --all-features
 
 ![read_all benchmark chart](charts/read_all.svg)
 
-| File Size | `std::fs::read` | fastio sync (pool) | Speedup | fastio mmap |
-|:----------|:----------------|:-------------------|:--------|:------------|
-| 4 KiB     | 6.42 µs         | 2.23 µs            | **2.9x** | 5.39 µs    |
-| 64 KiB    | 9.73 µs         | 5.67 µs            | **1.7x** | 5.23 µs    |
-| 1 MiB     | 72.6 µs         | 66.8 µs            | **1.1x** | 5.14 µs    |
-| 16 MiB    | 1.66 ms         | 1.70 ms            | ~1x      | 5.73 µs    |
-| 64 MiB    | 55.3 ms         | 25.3 ms            | **2.2x** | 6.39 µs    |
+| File Size | `std::fs::read` | fastio sync | Speedup | fastio mmap |
+|:----------|:----------------|:------------|:--------|:------------|
+| 4 KiB     | 6.42 µs         | 2.23 µs     | **2.9x** | 5.39 µs    |
+| 64 KiB    | 9.73 µs         | 5.67 µs     | **1.7x** | 5.23 µs    |
+| 1 MiB     | 72.6 µs         | 66.8 µs     | **1.1x** | 5.14 µs    |
+| 16 MiB    | 1.66 ms         | 1.70 ms     | ~1x      | 5.73 µs    |
+| 64 MiB    | 55.3 ms         | 25.3 ms     | **2.2x** | 6.39 µs    |
 
-fastio sync with pooled buffers is faster for most file sizes because the pool
+fastio sync is faster for most file sizes because the internal buffer pool
 recycles allocations instead of going through `mmap`/`munmap` on every call. At
 16 MiB the two are within measurement noise. The mmap backend returns a lazy
 mapping in ~5 µs; actual data transfer happens on first access via page faults.
@@ -67,25 +67,13 @@ fastio sync matches raw `pwrite` with zero abstraction overhead:
 | 16 MiB    | 3.74 µs      | 4.10 µs     |
 | 64 MiB    | 3.82 µs      | 3.76 µs     |
 
-### Buffer Allocator
+### Buffer Allocation
 
-![allocator benchmark chart](charts/allocator.svg)
-
-The pool allocator recycles buffers instead of going through `mmap`/`munmap` on
-every allocation. The speedup grows with buffer size because the system allocator
-falls back to `mmap` for allocations above ~128 KiB, paying full syscall cost
-each time:
-
-| Buffer Size | System alloc | Pool alloc | Speedup          |
-|:------------|:-------------|:-----------|:-----------------|
-| 4 KiB       | 109 ns       | 17.2 ns    | **6x**           |
-| 64 KiB      | 778 ns       | 30.3 ns    | **26x**          |
-| 1 MiB       | 16.2 µs      | 30.8 ns    | **527x**         |
-| 16 MiB      | 268 µs       | 30.1 ns    | **8,900x**       |
-
-The pool allocator is an implementation detail of how reads allocate buffers. It
-is not a backend. With the `pool` feature enabled, reads use pooled buffers by
-default. Pass `System` to `OpenOptions` to force standard heap allocation.
+Read buffers are allocated through an internal `zeropool` pool. The pool
+recycles large buffers instead of going through `mmap`/`munmap` on every call,
+which is the main reason fastio sync outperforms `std::fs::read` on large files.
+The pool is not a public API; it is used automatically by the read-capable
+backends.
 
 ### io_uring Batch Reads (`read_at_batch`)
 
@@ -117,24 +105,24 @@ as `std::fs::File`:
 | Read      | 64 MiB    | 5.99 ms   | 6.14 ms     |
 | Write     | 1 MiB     | 123 µs    | 125 µs      |
 | Write     | 16 MiB    | 1.91 ms   | 1.94 ms     |
-| Write     | 64 MiB    | 9.07 ms   | 9.39 ms     |
+| Write     | 64 MiB    | 9.07 ms   | 9.39 µs     |
 
 ### Async Read (Tokio)
 
 ![async read benchmark chart](charts/async_read.svg)
 
-| File Size | `tokio::fs::read` | fastio tokio (pool) | Notes                   |
-|:----------|:-------------------|:--------------------|:------------------------|
-| 4 KiB     | 35.4 µs            | 74.8 µs             | dispatch overhead       |
-| 64 KiB    | 38.8 µs            | 83.4 µs             | dispatch overhead       |
-| 1 MiB     | 125 µs             | 200 µs              | dispatch overhead       |
-| 16 MiB    | 1.46 ms            | 2.22 ms             | dispatch overhead       |
-| 64 MiB    | 53.6 ms            | **48.7 ms**         | pool pays off           |
+| File Size | `tokio::fs::read` | fastio tokio | Notes                   |
+|:----------|:-------------------|:-------------|:------------------------|
+| 4 KiB     | 35.4 µs            | 74.8 µs      | dispatch overhead       |
+| 64 KiB    | 38.8 µs            | 83.4 µs      | dispatch overhead       |
+| 1 MiB     | 125 µs             | 200 µs       | dispatch overhead       |
+| 16 MiB    | 1.46 ms            | 2.22 ms      | dispatch overhead       |
+| 64 MiB    | 53.6 ms            | **48.7 ms**  | pool pays off           |
 
 fastio tokio uses `spawn_blocking` with a `try_clone`d file handle per call.
 This adds dispatch overhead compared to `tokio::fs` which caches its internal
-handle. At 64 MiB the pooled allocator saves enough allocation cost to offset
-the dispatch overhead. For async workloads with mostly small reads,
+handle. At 64 MiB the internal pool saves enough allocation cost to offset the
+dispatch overhead. For async workloads with mostly small reads,
 `tokio::fs::read` will be faster.
 
 ### Methodology
@@ -158,12 +146,12 @@ All backends are enabled by default. To select specific backends:
 
 ```toml
 [dependencies]
-fastio = { version = "0.3", default-features = false, features = ["sync", "pool"] }
+fastio = { version = "0.3", default-features = false, features = ["sync", "tokio"] }
 ```
 
 ### Requirements
 
-* Rust 1.92+ (edition 2024)
+* Rust 1.93+ (edition 2024)
 * Linux kernel 5.6+ for the `io_uring` backend
 
 ## Usage
@@ -174,19 +162,6 @@ fastio = { version = "0.3", default-features = false, features = ["sync", "pool"
 use fastio::sync::File;
 
 let file = File::open("data.bin")?;
-let bytes = file.read_at(0, 4096)?;
-# Ok::<(), std::io::Error>(())
-```
-
-### System Allocator
-
-```rust
-use fastio::{System, sync::File};
-
-let file = File::options()
-    .read(true)
-    .allocator(System)
-    .open("data.bin")?;
 let bytes = file.read_at(0, 4096)?;
 # Ok::<(), std::io::Error>(())
 ```
@@ -231,12 +206,9 @@ let results = file.read_at_batch(&regions)?;
 | `tokio`      | Async I/O via Tokio (no Rayon dependency)            |
 | `mmap`       | Read only memory maps via `memmap2`                  |
 | `io-uring`   | Linux `io_uring` backend with batch support          |
-| `pool`       | Pooled read buffers via `zeropool`                   |
 
-With `pool` enabled, read methods allocate from the process wide pool by default
-and return `OwnedBytes::Pooled`. Pass `System` to an `OpenOptions` to force heap
-backed `OwnedBytes::Vec` reads. Zero length reads return an empty
-`OwnedBytes::Vec` without touching the allocator.
+Read-capable backends use an internal `zeropool` pool by default. Mapped reads
+return the mmap backend's region directly and are not pooled.
 
 ## Development
 

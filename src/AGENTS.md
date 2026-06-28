@@ -15,15 +15,15 @@ Guidelines for agents editing `src`.
 ## Feature Gates
 
 - `tokio` code requires `feature = "tokio"`.
-- `mmap::File`, `MmapRegion`, and `OwnedBytes::Mmap` require `feature = "mmap"`.
-- Pool-backed buffers require `feature = "pool"`.
+- `mmap::File`, `MmapRegion`, and `Bytes::from_mmap` require `feature = "mmap"`.
+
 - `io_uring` is Linux-only and requires `feature = "io-uring"`.
 
 ## Allocation
 
-- Read-capable backends must use their configured `Allocator` for owned read buffers.
-- `DefaultAllocator` is `Pool` when `pool` is enabled and `System` otherwise.
-- Keep mmap separate from allocator-backed reads; mapped bytes are not pooled buffers.
+- Read-capable backends must allocate through the internal `Bytes::allocate` path.
+- Default reads should return pooled buffers; keep mmap separate from allocator-backed reads.
+- Mapped bytes are not pooled buffers.
 
 ## Validation
 
