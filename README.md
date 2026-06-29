@@ -30,6 +30,67 @@ There is no default backend and no module level convenience API. You choose.
 * **`uring`** (Linux only): Ring backed positioned I/O with `read_at_batch` for
   submitting multiple reads in a single syscall.
 
+## Platform Support
+
+| Backend | Linux | macOS | Windows | Required feature |
+|:--------|:------|:------|:--------|:-----------------|
+| `sync`  | ✅    | ✅    | ✅      | `sync`           |
+| `tokio` | ✅    | ✅    | ✅      | `tokio`          |
+| `mmap`  | ✅    | ✅    | ✅      | `mmap`           |
+| `uring` | ✅    | ❌    | ❌      | `io-uring`       |
+
+## Backend Selection
+
+Choose the backend that matches your workload rather than a single default:
+
+* Use **`sync`** when you want synchronous, positioned I/O with no runtime
+  dependency. It is the best default for command-line tools, single-threaded
+  batch processing, and any code that already owns its threads.
+
+* Use **`tokio`** when you are already using Tokio and need async positioned
+  I/O. Positioned operations are offloaded to `spawn_blocking` so they do not
+  block runtime worker threads. Expect dispatch overhead on small reads; the
+  internal buffer pool helps on large reads.
+
+* Use **`mmap`** for read-only access to very large files where lazy loading is
+  more important than up-front copy cost. The mapping is created in ~5 µs;
+  actual data transfer happens on first access via page faults. Mutating the
+  underlying file while it is mapped is unsafe and can cause `SIGBUS`.
+
+* Use **`uring`** on Linux when you need to submit many positioned reads in a
+  single syscall. The crossover point is around 32 reads per batch; for single
+  reads, `sync::File::read_at` is usually faster.
+
+## Cursor and Positioned Semantics
+
+fastio backends implement `std::io::Read`, `std::io::Write`, and `std::io::Seek`
+where applicable, so cursor-based I/O works as expected. Positioned methods
+(`read_at`, `read_exact_at`, `write_all_at`, `write_slices_at`) operate at an
+explicit offset and do not require or modify the cursor.
+
+* On Linux and macOS, positioned reads/writes use `pread`/`pwrite`, which do
+  not move the file cursor. Cursor and positioned operations can interleave
+  safely.
+
+* On Windows, positioned reads/writes use `seek_read`/`seek_write`, which do
+  move the shared kernel cursor. fastio saves and restores the cursor around
+  each positioned call. This restore is not atomic: concurrent operations on
+  the same handle (or a clone that shares the same kernel file object) may
+  observe the temporary cursor position.
+
+* `mmap` reads are not cursor-based; they access the mapped region directly.
+
+## Zero-Length and Allocation Behavior
+
+* `read_at` and `read_all` with length `0` return an empty `Bytes` without
+  touching the allocator.
+
+* Read-capable backends allocate through an internal process-wide `zeropool`
+  pool. The pool recycles large buffers instead of going through `mmap`/`munmap`
+  on every call. The pool is not a public API; it is used automatically by the
+  read-capable backends. Mapped reads return the `mmap` backend's region
+  directly and are not pooled.
+
 ## Performance
 
 All benchmarks use [Criterion.rs](https://bheisler.github.io/criterion.rs/book/)
@@ -66,14 +127,6 @@ fastio sync matches raw `pwrite` with zero abstraction overhead:
 | 1 MiB     | 3.76 µs      | 3.84 µs     |
 | 16 MiB    | 3.74 µs      | 4.10 µs     |
 | 64 MiB    | 3.82 µs      | 3.76 µs     |
-
-### Buffer Allocation
-
-Read buffers are allocated through an internal `zeropool` pool. The pool
-recycles large buffers instead of going through `mmap`/`munmap` on every call,
-which is the main reason fastio sync outperforms `std::fs::read` on large files.
-The pool is not a public API; it is used automatically by the read-capable
-backends.
 
 ### io_uring Batch Reads (`read_at_batch`)
 
@@ -232,8 +285,8 @@ group.
 
 ## Contributing
 
-Contributions are welcome. Please run the full validation suite before submitting
-a pull request.
+Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for build and
+test commands, architecture constraints, and the pull request process.
 
 ## License
 
