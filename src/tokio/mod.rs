@@ -5,8 +5,6 @@
 
 use std::fs::{Metadata, Permissions};
 use std::io;
-#[cfg(windows)]
-use std::io::Seek;
 use std::path::Path;
 
 use crate::{Bytes, IoResult, WriteSlices};
@@ -187,31 +185,40 @@ impl File {
 
     #[cfg(windows)]
     fn read_at_positioned(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> IoResult<()> {
-        use std::os::windows::fs::FileExt;
+        use std::io::Seek;
         let mut handle = file;
         let original_position = handle.stream_position()?;
+        let result = Self::seek_read_exact(file, offset, buf);
+        let restore = handle.seek(std::io::SeekFrom::Start(original_position));
+        match result {
+            Ok(()) => restore.map(|_| ()),
+            Err(err) => Err(err),
+        }
+    }
+
+    #[cfg(windows)]
+    fn seek_read_exact(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> IoResult<()> {
+        use std::os::windows::fs::FileExt;
         let mut read = 0;
-        let mut result = Ok(());
         while read < buf.len() {
             let read_offset = offset.checked_add(read as u64).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "read offset overflow")
             })?;
             let n = file.seek_read(&mut buf[read..], read_offset)?;
             if n == 0 {
-                result = Err(io::Error::new(
+                return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "unexpected EOF during positioned read",
                 ));
-                break;
             }
             read += n;
         }
-        let restore = handle.seek(std::io::SeekFrom::Start(original_position));
-        result.and(restore.map(|_| ()))
+        Ok(())
     }
 
     /// Positioned write that does not require a seek.
     #[cfg(unix)]
+    #[inline]
     fn write_at_positioned(file: &std::fs::File, offset: u64, data: &[u8]) -> IoResult<()> {
         use std::os::unix::fs::FileExt;
         file.write_all_at(data, offset)
@@ -219,27 +226,35 @@ impl File {
 
     #[cfg(windows)]
     fn write_at_positioned(file: &std::fs::File, offset: u64, data: &[u8]) -> IoResult<()> {
-        use std::os::windows::fs::FileExt;
+        use std::io::Seek;
         let mut handle = file;
         let original_position = handle.stream_position()?;
+        let result = Self::seek_write_exact(file, offset, data);
+        let restore = handle.seek(std::io::SeekFrom::Start(original_position));
+        match result {
+            Ok(()) => restore.map(|_| ()),
+            Err(err) => Err(err),
+        }
+    }
+
+    #[cfg(windows)]
+    fn seek_write_exact(file: &std::fs::File, offset: u64, data: &[u8]) -> IoResult<()> {
+        use std::os::windows::fs::FileExt;
         let mut written = 0;
-        let mut result = Ok(());
         while written < data.len() {
             let write_offset = offset.checked_add(written as u64).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "write offset overflow")
             })?;
             let n = file.seek_write(&data[written..], write_offset)?;
             if n == 0 {
-                result = Err(io::Error::new(
+                return Err(io::Error::new(
                     io::ErrorKind::WriteZero,
                     "seek_write returned zero bytes",
                 ));
-                break;
             }
             written += n;
         }
-        let restore = handle.seek(std::io::SeekFrom::Start(original_position));
-        result.and(restore.map(|_| ()))
+        Ok(())
     }
 }
 
@@ -544,5 +559,53 @@ mod tests {
         let result = file.read_all().await.unwrap();
         let expected: Vec<u8> = (0..16).flat_map(|i| vec![b'a' + i as u8; 2]).collect();
         assert_eq!(result.as_ref(), &expected[..]);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_at_preserves_cursor_position() {
+        use std::io::SeekFrom;
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cursor.bin");
+        std::fs::write(&path, b"abcdefghij").unwrap();
+        let file = File::open(&path).await.unwrap();
+
+        // Clone the inner tokio handle so we can inspect the shared cursor.
+        let mut handle = file.as_ref().try_clone().await.unwrap();
+        handle.seek(SeekFrom::Start(2)).await.unwrap();
+        let buf = file.read_at(5, 3).await.unwrap();
+        assert_eq!(buf.as_ref(), b"fgh");
+
+        let mut after = [0u8; 1];
+        handle.read_exact(&mut after).await.unwrap();
+        assert_eq!(&after, b"c");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_all_at_preserves_cursor_position() {
+        use std::io::SeekFrom;
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cursor.bin");
+        std::fs::write(&path, b"abcdefghij").unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .await
+            .unwrap();
+
+        let mut handle = file.as_ref().try_clone().await.unwrap();
+        handle.seek(SeekFrom::Start(1)).await.unwrap();
+        file.write_all_at(6, b"XYZ").await.unwrap();
+
+        let mut after = [0u8; 1];
+        handle.read_exact(&mut after).await.unwrap();
+        assert_eq!(&after, b"b");
+
+        drop(file);
+        assert_eq!(std::fs::read(&path).unwrap(), b"abcdefXYZj");
     }
 }
