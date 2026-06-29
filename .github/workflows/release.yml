@@ -26,10 +26,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      - name: Install Rust (MSRV)
+        uses: dtolnay/rust-toolchain@1.93
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -43,8 +46,21 @@ jobs:
       - name: Test all features
         run: cargo test --all-features
 
-      - name: Verify package
-        run: cargo package --locked
+      - name: Check MSRV build
+        run: cargo +1.93 check --all-targets --all-features
+
+      - name: Check critical feature combinations
+        run: |
+          cargo check --no-default-features --all-targets
+          cargo check --no-default-features --features sync --all-targets
+          cargo check --no-default-features --features tokio --all-targets
+          cargo check --no-default-features --features mmap --all-targets
+
+      - name: Dry-run publish
+        run: cargo publish --dry-run --locked
+
+      - name: Verify package contents
+        run: cargo package --locked --list
 
       - name: Publish crate
         if: startsWith(github.ref, 'refs/tags/v') || inputs.publish

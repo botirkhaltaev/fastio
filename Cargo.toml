@@ -8,6 +8,11 @@ license = "Apache-2.0"
 repository = "https://github.com/botirk38/fastio"
 keywords = ["io", "storage", "performance", "mmap", "async"]
 categories = ["filesystem", "asynchronous", "concurrency"]
+exclude = ["AGENTS.md", "src/**/AGENTS.md", ".github", "fuzz"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["sync", "mmap", "tokio", "io-uring"]

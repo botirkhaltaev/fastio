@@ -25,16 +25,22 @@
 //! # Ok::<(), std::io::Error>(())
 //! ```
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 pub mod buffer;
 pub mod write;
 
 #[cfg(feature = "mmap")]
+#[cfg_attr(docsrs, doc(cfg(feature = "mmap")))]
 pub mod mmap;
 #[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
 pub mod sync;
 #[cfg(feature = "tokio")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
 pub mod tokio;
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
+#[cfg_attr(docsrs, doc(cfg(all(target_os = "linux", feature = "io-uring"))))]
 pub mod uring;
 
 pub use std::io::Error;
@@ -42,5 +48,6 @@ pub use std::io::Result as IoResult;
 
 pub use buffer::Bytes;
 #[cfg(feature = "mmap")]
+#[cfg_attr(docsrs, doc(cfg(feature = "mmap")))]
 pub use mmap::MmapRegion;
 pub use write::{WriteSlice, WriteSlices};
