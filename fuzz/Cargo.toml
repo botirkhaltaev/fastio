@@ -1,0 +1,19 @@
+[package]
+name = "fastio-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+fastio = { path = "..", default-features = false, features = ["sync", "mmap"] }
+
+[[bin]]
+name = "write_slices"
+path = "targets/write_slices.rs"
+
+test = false
+doc = false

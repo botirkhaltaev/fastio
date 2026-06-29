@@ -142,6 +142,14 @@ impl File {
             return Ok(Vec::new());
         }
 
+        for &(offset, len) in regions {
+            if len > 0 {
+                offset
+                    .checked_add(len as u64)
+                    .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "read region overflow"))?;
+            }
+        }
+
         let mut buffers: Vec<Bytes> = regions
             .iter()
             .map(|&(_, len)| Bytes::allocate(len, |_| Ok(())))
@@ -1034,5 +1042,106 @@ mod tests {
         let err = OpenOptions::new().append(true).open(&path).unwrap_err();
 
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn read_at_batch_roundtrips_multiple_regions() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("batch.bin");
+        let data = b"0123456789abcdef";
+        std::fs::write(&path, data).unwrap();
+        let file = File::open(&path).unwrap();
+
+        let regions = [(0, 4), (8, 4), (12, 4)];
+        let Some(results) = allow_unavailable(file.read_at_batch(&regions)) else {
+            return;
+        };
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].as_ref(), b"0123");
+        assert_eq!(results[1].as_ref(), b"89ab");
+        assert_eq!(results[2].as_ref(), b"cdef");
+    }
+
+    #[test]
+    fn read_at_batch_empty_regions_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("empty-batch.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        let file = File::open(&path).unwrap();
+
+        let Some(results) = allow_unavailable(file.read_at_batch(&[])) else {
+            return;
+        };
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn read_at_batch_with_empty_region_is_allowed() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("batch-empty.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        let file = File::open(&path).unwrap();
+
+        let regions = [(0, 2), (2, 0), (2, 3)];
+        let Some(results) = allow_unavailable(file.read_at_batch(&regions)) else {
+            return;
+        };
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].as_ref(), b"he");
+        assert!(results[1].is_empty());
+        assert_eq!(results[2].as_ref(), b"llo");
+    }
+
+    #[test]
+    fn read_at_batch_region_overflow_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("overflow.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        let file = File::open(&path).unwrap();
+
+        let regions = [(u64::MAX - 1, 4)];
+        let err = file.read_at_batch(&regions).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn read_at_batch_short_read_returns_eof() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("short-batch.bin");
+        std::fs::write(&path, b"hi").unwrap();
+        let file = File::open(&path).unwrap();
+
+        let regions = [(0, 10)];
+        let err = file.read_at_batch(&regions).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn zero_length_read_write_are_noops() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("noop.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        let Some(bytes) = allow_unavailable(file.read_at(0, 0)) else {
+            return;
+        };
+        assert!(bytes.is_empty());
+
+        let Some(()) = allow_unavailable(file.write_all_at(0, b"")) else {
+            return;
+        };
+
+        let Some(bytes) = allow_unavailable(file.read_all()) else {
+            return;
+        };
+        assert_eq!(bytes.as_ref(), b"hello");
     }
 }

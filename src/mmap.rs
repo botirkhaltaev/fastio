@@ -334,4 +334,62 @@ mod tests {
         assert_eq!(cloned.as_slice(), b"hello_mmap");
         assert_eq!(region.as_slice(), b"hello_mmap");
     }
+
+    #[test]
+    fn map_range_unaligned_offset_is_allowed() {
+        let dir = TempDir::new().unwrap();
+        let data: Vec<u8> = (0u8..200).collect();
+        let path = dir.path().join("unaligned.bin");
+        std::fs::write(&path, &data).unwrap();
+
+        // Assuming a page size >= 4096, offset 100 is inside a page.
+        let region = File::open(&path).unwrap().map_range(100, 50).unwrap();
+        assert_eq!(region.as_slice(), &data[100..150]);
+    }
+
+    #[test]
+    fn map_range_at_file_boundary_returns_exact_len() {
+        let dir = TempDir::new().unwrap();
+        let data = vec![0xBBu8; 8192];
+        let path = dir.path().join("boundary.bin");
+        std::fs::write(&path, &data).unwrap();
+
+        let region = File::open(&path).unwrap().map_range(4096, 4096).unwrap();
+        assert_eq!(region.len(), 4096);
+        assert!(region.as_slice().iter().all(|&b| b == 0xBB));
+    }
+
+    #[test]
+    fn map_range_len_overflow_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("overflow.bin");
+        std::fs::write(&path, [0u8; 4096]).unwrap();
+
+        let err = File::open(&path)
+            .unwrap()
+            .map_range(4096, usize::MAX)
+            .unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn map_range_end_at_exact_file_size_is_allowed() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("exact.bin");
+        std::fs::write(&path, [0u8; 1024]).unwrap();
+
+        let region = File::open(&path).unwrap().map_range(0, 1024).unwrap();
+        assert_eq!(region.len(), 1024);
+    }
+
+    #[test]
+    fn map_range_one_byte_at_end_is_allowed() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("one_byte.bin");
+        std::fs::write(&path, [1, 2, 3]).unwrap();
+
+        let region = File::open(&path).unwrap().map_range(2, 1).unwrap();
+        assert_eq!(region.as_slice(), &[3]);
+    }
 }

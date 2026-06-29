@@ -123,4 +123,31 @@ mod file_api_tests {
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
+
+    #[test]
+    fn zero_length_write_is_noop() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("noop.bin");
+        std::fs::write(&path, b"----------").unwrap();
+
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all_at(0, b"").unwrap();
+        file.write_all_at(5, b"").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"----------");
+    }
+
+    #[test]
+    fn write_at_beyond_file_extends_for_writes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("extend.bin");
+        std::fs::write(&path, b"hello").unwrap();
+
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all_at(10, b"X").unwrap();
+
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(&contents[0..5], b"hello");
+        assert_eq!(contents[10], b'X');
+    }
 }
